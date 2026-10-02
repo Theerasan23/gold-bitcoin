@@ -1,0 +1,53 @@
+services:
+  # API สำหรับหน้าเว็บ (Next.js จะมาเรียกตัวนี้)
+  api:
+    image: goldbtc-engine:latest
+    build:
+      context: ./engine
+      args:
+        PIP_INDEX_URL: ${PIP_INDEX_URL:-https://pypi.org/simple}
+    command: ["serve", "--host", "0.0.0.0", "--port", "8000"]
+    ports:
+      - "8000:8000"
+    volumes:
+      - ./data:/data
+    user: "${UID:-1000}:${GID:-1000}"
+    environment:
+      CORS_ORIGINS: "http://localhost:3000"
+    restart: unless-stopped
+
+  # บัญชีเดโม : worker รันระบบตลอดเวลาด้วยเงินจำลอง (ราคาจริงจาก Binance แบบอ่านอย่างเดียว ไม่มีบัญชี/คีย์)
+  paper:
+    image: goldbtc-engine:latest
+    command: ["paper", "run"]
+    volumes:
+      - ./data:/data
+    user: "${UID:-1000}:${GID:-1000}"
+    restart: unless-stopped
+
+  # หน้าเว็บ (Next.js) — เรียก API ผ่าน /engine/* ภายใน network ของ compose
+  web:
+    image: goldbtc-web:latest
+    build:
+      context: ./web
+      args:
+        NPM_REGISTRY: ${NPM_REGISTRY:-https://registry.npmjs.org/}
+    ports:
+      - "${WEB_PORT:-3100}:3000"   # 3000 ชนกับโปรเจกต์อื่นในเครื่องนี้ -> ใช้ 3100
+    environment:
+      API_URL: http://api:8000
+    depends_on:
+      - api
+    restart: unless-stopped
+
+  # คำสั่งครั้งคราว: docker compose run --rm engine <fetch|backtest|ablate|...>
+  engine:
+    image: goldbtc-engine:latest
+    build:
+      context: ./engine
+      args:
+        PIP_INDEX_URL: ${PIP_INDEX_URL:-https://pypi.org/simple}
+    profiles: ["cli"]
+    volumes:
+      - ./data:/data
+    user: "${UID:-1000}:${GID:-1000}"

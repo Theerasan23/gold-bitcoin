@@ -1,0 +1,101 @@
+@import "tailwindcss";
+
+/* ---- token สี : ค่าผ่าน validator (CVD / contrast) ทั้งโหมดสว่างและมืด ---- */
+:root {
+  color-scheme: light;
+  --page: #f9f9f7;
+  --surface: #fcfcfb;
+  --surface-2: #f3f2ee;
+  --ink: #0b0b0b;
+  --ink-2: #52514e;
+  --muted: #898781;
+  --grid: #e1e0d9;
+  --axis: #c3c2b7;
+  --line: rgba(11, 11, 11, 0.1);
+  --series-1: #2a78d6;
+  --series-2: #eb6834;
+  --series-3: #1baf7a;
+  --bench: #898781;
+  --candle-up: #1baf7a;
+  --candle-down: #e34948;
+  --good: #0ca30c;
+  --good-text: #006300;
+  --warning: #fab219;
+  --critical: #d03b3b;
+  --critical-text: #b42c2c;
+  --accent: #2a78d6;
+  --poc: #c98500;
+}
+
+@media (prefers-color-scheme: dark) {
+  :root:where(:not([data-theme="light"])) {
+    color-scheme: dark;
+    --page: #0d0d0d;
+    --surface: #1a1a19;
+    --surface-2: #232321;
+    --ink: #ffffff;
+    --ink-2: #c3c2b7;
+    --muted: #898781;
+    --grid: #2c2c2a;
+    --axis: #383835;
+    --line: rgba(255, 255, 255, 0.1);
+    --series-1: #3987e5;
+    --series-2: #d95926;
+    --series-3: #199e70;
+    --bench: #898781;
+    --candle-up: #199e70;
+    --candle-down: #e66767;
+    --good-text: #0ca30c;
+    --critical-text: #e66767;
+    --accent: #3987e5;
+    --poc: #eda100;
+  }
+}
+
+:root[data-theme="dark"] {
+  color-scheme: dark;
+  --page: #0d0d0d;
+  --surface: #1a1a19;
+  --surface-2: #232321;
+  --ink: #ffffff;
+  --ink-2: #c3c2b7;
+  --muted: #898781;
+  --grid: #2c2c2a;
+  --axis: #383835;
+  --line: rgba(255, 255, 255, 0.1);
+  --series-1: #3987e5;
+  --series-2: #d95926;
+  --series-3: #199e70;
+  --bench: #898781;
+  --candle-up: #199e70;
+  --candle-down: #e66767;
+  --good-text: #0ca30c;
+  --critical-text: #e66767;
+  --accent: #3987e5;
+  --poc: #eda100;
+}
+
+@theme inline {
+  --color-page: var(--page);
+  --color-surface: var(--surface);
+  --color-surface-2: var(--surface-2);
+  --color-ink: var(--ink);
+  --color-ink-2: var(--ink-2);
+  --color-muted: var(--muted);
+  --color-line: var(--line);
+  --color-accent: var(--accent);
+  --color-good: var(--good-text);
+  --color-bad: var(--critical-text);
+  --color-warn: var(--warning);
+  --font-sans: system-ui, -apple-system, "Segoe UI", "Noto Sans Thai", "Leelawadee UI", sans-serif;
+}
+
+body {
+  background: var(--page);
+  color: var(--ink);
+  font-family: var(--font-sans);
+}
+
+.tnum {
+  font-variant-numeric: tabular-nums;
+}

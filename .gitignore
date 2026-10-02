@@ -1,0 +1,35 @@
+# --- Runtime data (candles, paper runs, backtest results, numba cache) ---
+data/
+
+# --- Secrets / env ---
+.env
+.env.*
+!.env.example
+
+# --- Python (engine) ---
+__pycache__/
+*.py[cod]
+*.egg-info/
+.venv/
+venv/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.coverage
+htmlcov/
+.ipynb_checkpoints/
+
+# --- Node / Next.js (web; see also web/.gitignore) ---
+node_modules/
+.next/
+*.tsbuildinfo
+
+# --- Claude Code (personal settings) ---
+.claude/settings.local.json
+
+# --- Editor / OS ---
+.vscode/
+.idea/
+*.swp
+.DS_Store
+Thumbs.db

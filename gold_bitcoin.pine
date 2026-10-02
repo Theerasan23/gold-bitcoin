@@ -1,0 +1,1664 @@
+//@version=5
+// ============================================================================
+// BTC / GOLD  MULTI-TIMEFRAME TREND STRATEGY  (v3)
+// ----------------------------------------------------------------------------
+// แนวคิด: เทรดน้อยไม้ แต่ถือยาวให้กำไรวิ่ง  (เข้าถี่ = ค่าคอม + ผันผวน + แพ้บ่อย)
+//   - กรองด้วยเทรนด์ Timeframe ใหญ่ (ค่าเริ่มต้น 1D) + EMA + MACD + RSI + ADX + Volume
+//   - กรองด้วยระยะห่างจากแนวรับ/แนวต้าน (ไม่ซื้อชนแนวต้าน / ไม่ขายชนแนวรับ)
+//   - รวมเป็นคะแนน 100 เข้าเฉพาะคะแนนสูงเท่านั้น
+//   - ทำกำไรแบบ Trailing (Chandelier) เพื่อกินเทรนด์ยาว แทนการปิดที่ TP คงที่
+//   - แสดงแนวโน้ม + แนวรับแนวต้าน บนกราฟ และอัปเดตแบบเรียลไทม์
+// ----------------------------------------------------------------------------
+// เรียลไทม์: calc_on_every_tick = true  (ตาราง/แนวรับแนวต้าน/Trailing อัปเดตทุก tick)
+//            แต่ "สัญญาณเข้า" ยืนยันเมื่อแท่งปิดเท่านั้น -> ไม่ repaint
+// ============================================================================
+
+strategy("BTC/Gold MTF Trend Strategy", shorttitle="BTC/GOLD", overlay=true,
+     initial_capital       = 10000,
+     default_qty_type      = strategy.percent_of_equity, default_qty_value = 10,
+     commission_type       = strategy.commission.percent, commission_value = 0.05,
+     slippage              = 2,
+     pyramiding            = 0,
+     calc_on_every_tick    = true,
+     max_labels_count      = 500,
+     max_lines_count       = 500,
+     max_bars_back         = 1000)
+
+// ============================================================================
+// INPUTS
+// ============================================================================
+gRt   = "0) โหมดเรียลไทม์"
+gHtf  = "1) ตัวกรอง Timeframe ใหญ่"
+gTrd  = "2) เทรนด์บนกราฟ (EMA)"
+gMom  = "3) โมเมนตัม (MACD / RSI)"
+gStr  = "4) ความแรงเทรนด์ (ADX / Volume)"
+gSr   = "5) แนวรับ - แนวต้าน"
+gScr  = "6) ระบบให้คะแนน (คุมความถี่)"
+gRisk = "7) บริหารความเสี่ยง / ทำกำไร"
+gDir  = "8) ทิศทาง / ช่วงเวลา"
+gUi   = "9) การแสดงผล"
+
+confirmOnClose = input.bool(true, "ยืนยันสัญญาณเมื่อแท่งปิด (กัน repaint)", group=gRt,
+     tooltip="เปิดไว้: ตาราง/เส้นแนวรับแนวต้าน/Trailing ยังอัปเดตสดทุก tick แต่สัญญาณเข้าจะนิ่ง ไม่กะพริบ", display = display.none)
+
+useHtf     = input.bool(true, "ใช้ตัวกรอง Timeframe ใหญ่", group=gHtf, display = display.none)
+htfInput   = input.timeframe("D", "Timeframe ใหญ่", group=gHtf,
+     tooltip="ถ้ากราฟที่ดูอยู่เป็น 1D หรือใหญ่กว่า สคริปต์จะเลื่อนไปใช้ W / M ให้อัตโนมัติ", display = display.none)
+htfFastLen = input.int(21, "EMA เร็ว (TF ใหญ่)", minval=2, group=gHtf, display = display.none)
+htfSlowLen = input.int(55, "EMA ช้า (TF ใหญ่)", minval=3, group=gHtf, display = display.none)
+
+emaFastLen = input.int(50,  "EMA เร็ว", minval=2, group=gTrd, display = display.none)
+emaSlowLen = input.int(200, "EMA ช้า",  minval=3, group=gTrd, display = display.none)
+
+macdFast      = input.int(12, "MACD Fast",   group=gMom, display = display.none)
+macdSlow      = input.int(26, "MACD Slow",   group=gMom, display = display.none)
+macdSignal    = input.int(9,  "MACD Signal", group=gMom, display = display.none)
+crossLookback = input.int(3, "รับสัญญาณตัดกันย้อนหลังได้กี่แท่ง", minval=1, maxval=10, group=gMom, display = display.none)
+rsiLen      = input.int(14, "RSI Length", group=gMom, display = display.none)
+rsiLongMin  = input.int(45, "RSI ต่ำสุดสำหรับ Long",  group=gMom, display = display.none)
+rsiLongMax  = input.int(72, "RSI สูงสุดสำหรับ Long",  group=gMom, display = display.none)
+rsiShortMax = input.int(55, "RSI สูงสุดสำหรับ Short", group=gMom, display = display.none)
+rsiShortMin = input.int(28, "RSI ต่ำสุดสำหรับ Short", group=gMom, display = display.none)
+
+adxLen    = input.int(14, "ADX / DI Length", group=gStr, display = display.none)
+adxSmooth = input.int(14, "ADX Smoothing",   group=gStr, display = display.none)
+adxMin    = input.float(25, "ADX ขั้นต่ำ (เทรนด์ต้องแรงพอ)", step=1, group=gStr,
+     tooltip="ยิ่งสูง = เทรดน้อยลงแต่คุณภาพสูงขึ้น  แนะนำ 22-30", display = display.none)
+volLen  = input.int(20, "ค่าเฉลี่ย Volume", group=gStr, display = display.none)
+volMult = input.float(1.0, "Volume ต้องมากกว่าค่าเฉลี่ยกี่เท่า", step=0.1, group=gStr, display = display.none)
+
+showSR     = input.bool(true, "แสดงแนวรับ - แนวต้าน", group=gSr, display = display.none)
+pivLeft    = input.int(15, "Pivot ซ้าย (แท่ง)",  minval=2, group=gSr,
+     tooltip="ยิ่งมาก = ได้เฉพาะแนวสำคัญจริง เส้นน้อยลง", display = display.none)
+pivRight   = input.int(15, "Pivot ขวา (แท่ง)",  minval=2, group=gSr, display = display.none)
+srMax      = input.int(6, "จำนวนแนวสูงสุดที่เก็บ", minval=2, maxval=20, group=gSr, display = display.none)
+srMergeAtr = input.float(0.7, "รวมแนวที่ใกล้กันภายใน (x ATR)", step=0.1, group=gSr, display = display.none)
+srLen      = input.int(200, "ความยาวเส้นที่ลากย้อนหลัง (แท่ง)", minval=20, group=gSr, display = display.none)
+useSrFilter = input.bool(true, "ห้ามเข้าเมื่อชนแนวรับ/แนวต้าน", group=gSr, display = display.none)
+srMinAtr    = input.float(1.5, "ต้องมีระยะวิ่งอย่างน้อย (x ATR)", step=0.1, group=gSr,
+     tooltip="ไม่ซื้อถ้าแนวต้านอยู่ใกล้กว่านี้ / ไม่ขายถ้าแนวรับอยู่ใกล้กว่านี้", display = display.none)
+
+minScore     = input.int(80, "คะแนนขั้นต่ำที่จะเข้าเทรด", minval=0, maxval=100, step=5, group=gScr,
+     tooltip="80 = เข้าน้อยมากแต่คุณภาพสูง | 70 = ปานกลาง | 60 = ถี่", display = display.none)
+watchScore   = input.int(65, "คะแนนที่เริ่ม 'เฝ้าดู'", minval=0, maxval=100, step=5, group=gScr, display = display.none)
+cooldownBars = input.int(15, "เว้นระยะหลังเข้าไม้ (แท่ง)", minval=0, group=gScr,
+     tooltip="กันเข้าซ้ำถี่ตอนราคาแกว่ง  ยิ่งมาก = ไม้ห่างขึ้น", display = display.none)
+
+MODE_TRAIL = "Trailing ล้วน (กินเทรนด์ยาวสุด)"
+MODE_MIX   = "ผสม: ปิดบางส่วนที่ TP1 + Trailing"
+MODE_FIX   = "TP คงที่ตาม R:R"
+tpMode = input.string(MODE_TRAIL, "โหมดทำกำไร", options=[MODE_TRAIL, MODE_MIX, MODE_FIX], group=gRisk,
+     tooltip="Trailing = ไม่ปิดจนกว่าเทรนด์จะจบ ให้ผลตอบแทนต่อไม้สูงสุด แต่ต้องทนคืนกำไรบางส่วน", display = display.none)
+atrLen     = input.int(14, "ATR Length", group=gRisk, display = display.none)
+atrMultSL  = input.float(2.0, "ATR x = ระยะ Stop Loss เริ่มต้น", step=0.1, group=gRisk, display = display.none)
+trailMult  = input.float(3.0, "Trailing: ATR x จากจุดสูง/ต่ำสุดหลังเข้าไม้ (ยิ่งมาก = ถือยาวขึ้น)", step=0.1, group=gRisk, display = display.none)
+tp1R       = input.float(2.0, "TP1 ที่กี่ R (โหมดผสม)", step=0.5, group=gRisk, display = display.none)
+tp1Pct     = input.int(50, "ปิดกี่ % ที่ TP1 (โหมดผสม)", minval=10, maxval=90, group=gRisk, display = display.none)
+riskReward = input.float(3.0, "R:R (โหมด TP คงที่)", step=0.5, group=gRisk, display = display.none)
+useBE      = input.bool(true, "เลื่อน SL มาที่ทุนเมื่อกำไรถึง 1R", group=gRisk, display = display.none)
+
+allowLong  = input.bool(true, "อนุญาต Long",  group=gDir, display = display.none)
+allowShort = input.bool(true, "อนุญาต Short", group=gDir, display = display.none)
+startDate  = input.time(timestamp("2018-01-01"), "เริ่ม Backtest",   group=gDir)
+endDate    = input.time(timestamp("2099-01-01"), "สิ้นสุด Backtest", group=gDir)
+
+gMath = "5.5) เครื่องมือคณิตศาสตร์วิเคราะห์แนวโน้ม"
+
+holtAlpha  = input.float(0.10, "Holt/Kalman: alpha (ปรับระดับ)", minval=0.01, maxval=1.0, step=0.01, group=gMath, tooltip="ยิ่งต่ำ = เส้นนิ่ง ตอบสนองช้า  ยิ่งสูง = ไวแต่มีสัญญาณรบกวน", display = display.none)
+holtBeta   = input.float(0.05, "Holt/Kalman: beta (ปรับความชัน)", minval=0.01, maxval=1.0, step=0.01, group=gMath, display = display.none)
+erLen      = input.int(20, "Efficiency Ratio: ช่วง", minval=5, group=gMath, tooltip="วัดว่าราคาเดินเป็นเส้นตรงแค่ไหน 0=มั่ว 1=ตรงเป๊ะ", display = display.none)
+regLen     = input.int(50, "Linear Regression: ช่วง", minval=10, group=gMath, tooltip="ใช้หา R-squared และความชันของเทรนด์", display = display.none)
+zLen       = input.int(100, "Z-score: ช่วง", minval=20, group=gMath, display = display.none)
+slopeRef   = input.float(0.25, "ความชันอ้างอิง (ATR/แท่ง) = แรงเต็ม 100%", minval=0.05, step=0.05, group=gMath, display = display.none)
+zMax       = input.float(2.0, "Z-score สูงสุดที่ยังเข้าได้", minval=0.5, step=0.1, group=gMath, tooltip="เกินนี้ = ราคายืดเกินไป เสี่ยงย่อ", display = display.none)
+confMin    = input.int(50, "ความเชื่อมั่นแนวโน้มขั้นต่ำ %", minval=0, maxval=100, step=5, group=gMath, display = display.none)
+accLen    = input.int(200, "ช่วงวัดความแม่นของช่วงราคาย้อนหลัง", minval=30, group=gMath, display = display.none)
+showFcast  = input.bool(true, "แสดงช่วงราคาที่คาด (ความผันผวน)", group=gMath,
+     tooltip="ความผันผวนพยากรณ์ได้ แต่ทิศทางพยากรณ์ไม่ได้ - ใช้เป็นกรอบความเสี่ยง ไม่ใช่เป้าราคา", display = display.none)
+projBars   = input.int(10, "คาดการณ์ล่วงหน้ากี่แท่ง", minval=1, maxval=60, group=gMath, display = display.none)
+projZ      = input.float(1.96, "ความกว้างกรวย (1.0=68%, 1.96=95%)", minval=0.5, step=0.01, group=gMath, display = display.none)
+
+gEw = "5.7) คลื่น Elliott + เครื่องมือยืนยันเพิ่มเติม"
+ewOn      = input.bool(true, "วิเคราะห์โครงสร้างคลื่น Elliott", group=gEw,
+     tooltip="อ่านเฉพาะจุดกลับตัวที่ยืนยันแล้ว จึงไม่ repaint และไม่เปลี่ยนคำตอบไปมาทุกแท่ง", display = display.none)
+ewDepth   = input.int(12, "ความลึก ZigZag (แท่ง)", minval=4, maxval=100, group=gEw,
+     tooltip="ยิ่งมาก = จับเฉพาะคลื่นใหญ่ วิเคราะห์น้อยครั้งแต่ชัวร์ขึ้น  แนะนำ 10-20", display = display.none)
+ewMinAtr  = input.float(1.5, "ขนาดคลื่นขั้นต่ำ (x ATR)", step=0.1, group=gEw,
+     tooltip="คลื่นที่เล็กกว่านี้ถือเป็นสัญญาณรบกวน ไม่นับเป็นคลื่น", display = display.none)
+ewMinConf = input.int(60, "ความชัดของคลื่นขั้นต่ำ %", minval=0, maxval=100, step=5, group=gEw,
+     tooltip="ต่ำกว่านี้ถือว่ายังอ่านไม่ออก -> ไม่เอามาใช้ตัดสินใจ", display = display.none)
+ewFilter  = input.bool(true, "ห้ามเข้าสวนโครงสร้างคลื่น", group=gEw, display = display.none)
+showEw    = input.bool(true, "วาดคลื่น 1-2-3-4-5 บนกราฟ", group=gEw, display = display.none)
+ewCorrOn  = input.bool(true, "ตรวจจับคลื่นปรับฐาน A-B-C ด้วย", group=gEw,
+     tooltip="เปิดไว้ สคริปต์จะแยกได้ว่าการย่อครั้งนี้เป็น 'คลื่น 4 แล้วไปคลื่น 5' หรือ 'คลื่น A-B-C แล้วกลับตัว'", display = display.none)
+ewRead    = input.string("อัตโนมัติ (impulse มาก่อน)", "มุมมองการนับคลื่น", options=["อัตโนมัติ (impulse มาก่อน)", "เอนไปทางปรับฐาน A-B-C"], group=gEw,
+     tooltip="จุดกลับตัวชุดเดียวกันอ่านได้ 2 แบบเสมอ: 'พักคลื่น 4 → คลื่น 5' กับ 'คลื่น A-B-C → กลับตัว' เลือกให้ตรงกับมุมมองของคุณได้", display = display.none)
+showFib   = input.bool(true, "แสดงโซนทอง Fibonacci (0.5 - 0.618)", group=gEw, display = display.none)
+divOn     = input.bool(true, "ตรวจ RSI Divergence ที่จุดกลับตัว", group=gEw, display = display.none)
+divMinRsi = input.float(3.0, "ส่วนต่าง RSI ขั้นต่ำที่นับเป็นไดเวอร์เจนซ์", step=0.5, group=gEw, display = display.none)
+showVP    = input.bool(true, "คำนวณ Volume Profile (POC / Value Area)", group=gEw,
+     tooltip="หาโซนราคาที่มีการซื้อขายหนาแน่นที่สุด = แนวรับแนวต้านที่คนส่วนใหญ่ยอมรับจริง", display = display.none)
+vpLen     = input.int(250, "Volume Profile: ย้อนหลังกี่แท่ง", minval=50, maxval=500, group=gEw, display = display.none)
+vpBins    = input.int(24,  "Volume Profile: จำนวนชั้นราคา", minval=8, maxval=60, group=gEw, display = display.none)
+vpStep    = input.int(5,   "Volume Profile: คำนวณใหม่ทุกกี่แท่ง", minval=1, maxval=50, group=gEw, display = display.none)
+
+gRev = "5.8) จับจุดกลับเทรนด์ (โครงสร้างราคา)"
+revLen    = input.int(5, "ความลึกสวิง (แท่ง)", minval=2, maxval=30, group=gRev,
+     tooltip="ใช้หายอด/ก้นสวิงล่าสุด · ขาขึ้น = ทำยอดใหม่ ก้นยกตัว · ปิดหลุดก้นล่าสุดเมื่อไร = โครงสร้างกลับเป็นขาลง (และกลับกัน) · น้อย = ไวแต่หลอกบ่อย", display = display.none)
+revBuf    = input.float(0.1, "ต้องปิดทะลุเกินกี่ ATR", minval=0, step=0.05, group=gRev, display = display.none)
+exitOnRev = input.bool(true, "ปิดไม้ทันทีเมื่อโครงสร้างกลับข้าง", group=gRev,
+     tooltip="ออกเร็วกว่ารอ Trailing 3 ATR หรือรอ TF ใหญ่กลับ · ลองเทียบผล backtest เปิด/ปิด", display = display.none)
+revFilter = input.bool(true, "ห้ามเข้าสวนโครงสร้างล่าสุด", group=gRev,
+     tooltip="ไม่ซื้อหลังโครงสร้างกลับเป็นขาลง จนกว่าราคาจะปิดทะลุยอดสวิงล่าสุดอีกครั้ง (กันไล่ซื้อปลายเทรนด์)", display = display.none)
+showRev   = input.bool(true, "แสดงป้ายจุดกลับตัว + เส้นที่ต้องเฝ้า", group=gRev, display = display.none)
+
+txtSizeIn = input.string("ปกติ", "ขนาดตัวอักษร", options=["เล็ก", "ปกติ", "ใหญ่"], group=gUi, display = display.none)
+tSize = txtSizeIn == "เล็ก" ? size.small : txtSizeIn == "ปกติ" ? size.normal : size.large
+
+// ---- ธีม : อ่านสีพื้นหลังกราฟแล้วสลับชุดสีเอง (รองรับ Dark mode / Light mode) ----
+themeIn = input.string("อัตโนมัติ", "ธีมของตาราง", options=["อัตโนมัติ", "สว่าง", "มืด"], group=gUi,
+     tooltip="อัตโนมัติ = ดูความสว่างของพื้นหลังกราฟแล้วเลือกชุดสีที่อ่านง่ายให้เอง", display = display.none)
+bgLum  = 0.299 * color.r(chart.bg_color) + 0.587 * color.g(chart.bg_color) + 0.114 * color.b(chart.bg_color)
+isDark = themeIn == "อัตโนมัติ" ? bgLum < 128 : themeIn == "มืด"
+
+cHeadBg = isDark ? #2A2E39 : #3D4450
+cHeadTx = isDark ? #E8EAED : #FFFFFF
+cRowBg  = isDark ? color.new(#161A25, 8)  : color.new(#FFFFFF, 5)
+cRowAlt = isDark ? color.new(#222736, 10) : color.new(#EEF1F6, 5)
+cTx     = isDark ? #D6D9E0 : #131722
+cTxDim  = isDark ? #9AA0AE : #5A5F6B
+cFrame  = isDark ? color.new(#434651, 20) : color.new(#B0B6C2, 20)
+cGridC  = isDark ? color.new(#434651, 45) : color.new(#C9CDD6, 40)
+cUpS    = isDark ? #26C281 : #12945F
+cDnS    = isDark ? #F0544C : #D42A22
+cWarnS  = isDark ? #E8A33D : #B8791A
+cNeuS   = isDark ? #8A90A0 : #6B7280
+cOkBg   = isDark ? color.new(#26C281, 62) : color.new(#12945F, 70)
+cNoBg   = isDark ? color.new(#F0544C, 62) : color.new(#D42A22, 72)
+cWarnBg = isDark ? color.new(#E8A33D, 60) : color.new(#B8791A, 70)
+cNeuBg  = isDark ? color.new(#8A90A0, 70) : color.new(#6B7280, 78)
+showBanner = input.bool(true, "แสดงแถบแนวโน้มด้านบน", group=gUi, display = display.none)
+bannerSizeIn = input.string("ปกติ", "ขนาดแถบแนวโน้มด้านบน", options=["เล็ก", "ปกติ", "ใหญ่"], group=gUi, display = display.none)
+posBanIn = input.string("บนกลาง", "ตำแหน่งแถบสรุป", options=["บนกลาง", "บนซ้าย", "บนขวา", "ล่างกลาง", "ล่างซ้าย", "ล่างขวา"], group=gUi, display = display.none,
+     tooltip="ย้ายได้ถ้าชนกับตารางอื่น · แถบนี้ถูกตัดเป็น 4 บรรทัดสั้น ๆ แล้วเพื่อไม่ให้กว้างจนล้น")
+posBan = posBanIn == "บนกลาง" ? position.top_center : posBanIn == "บนซ้าย" ? position.top_left : posBanIn == "บนขวา" ? position.top_right : posBanIn == "ล่างกลาง" ? position.bottom_center : posBanIn == "ล่างซ้าย" ? position.bottom_left : position.bottom_right
+bSize1 = bannerSizeIn == "เล็ก" ? size.small : bannerSizeIn == "ปกติ" ? size.normal : size.large
+bSize2 = bannerSizeIn == "ใหญ่" ? size.normal : size.small
+
+mtfTf1 = input.timeframe("D", "Timeframe เปรียบเทียบ 1", group=gUi, display = display.none)
+mtfTf2 = input.timeframe("W", "Timeframe เปรียบเทียบ 2", group=gUi, display = display.none)
+useMtfFilter = input.bool(false, "บังคับให้ D1 และ 1W เห็นตรงกันจึงเข้าเทรด", group=gUi, tooltip="เปิดแล้วจะเทรดน้อยลงมาก ลองเทียบผล backtest ก่อนใช้จริง", display = display.none)
+compactTable = input.bool(true, "โหมดตารางกะทัดรัด (ซ่อนรายละเอียด)", group=gUi, tooltip="ปิดเพื่อดูคะแนนแยกรายปัจจัย", display = display.none)
+posSigIn  = input.string("ล่างขวา", "ตำแหน่งตารางคะแนน ซื้อ/ขาย", options=["บนขวา", "บนซ้าย", "กลางขวา", "กลางซ้าย", "ล่างขวา", "ล่างซ้าย"], group=gUi, display = display.none)
+posSig  = posSigIn  == "บนขวา" ? position.top_right : posSigIn  == "บนซ้าย" ? position.top_left : posSigIn  == "กลางขวา" ? position.middle_right : posSigIn  == "กลางซ้าย" ? position.middle_left : posSigIn  == "ล่างขวา" ? position.bottom_right : position.bottom_left
+
+showTrendPanel  = input.bool(false, "แสดงป้ายแนวโน้มลอยบนกราฟ", group=gUi, tooltip="ปิดไว้เพราะแถบด้านบนบอกข้อมูลเดียวกันแล้ว", display = display.none)
+showRibbon      = input.bool(true, "ระบายสีโซนเทรนด์ (EMA ribbon)", group=gUi, display = display.none)
+showTrendChange = input.bool(true, "แสดงจุดเปลี่ยนแนวโน้ม", group=gUi, display = display.none)
+showSignalTable = input.bool(true, "แสดงตารางคะแนน ซื้อ/ขาย", group=gUi, display = display.none)
+showLabels      = input.bool(true, "แสดงป้ายคะแนนตอนเข้าไม้",  group=gUi, display = display.none)
+
+gPlan = "10) แผนเข้า - ออก (คาดการณ์)"
+showPlan   = input.bool(true, "แสดงแผนจุดเข้า / จุดออก บนกราฟ", group=gPlan,
+     tooltip="วาดเส้นราคาที่ควรเข้า + SL + TP1 + TP2 ล่วงหน้า", display = display.none)
+planLen    = input.int(40, "ความยาวกล่องแผน (แท่ง)", minval=5, maxval=200, group=gPlan, display = display.none)
+showTrades = input.bool(true, "ลากเส้นจุดเข้า → จุดออก ของไม้ที่ผ่านมา", group=gPlan, display = display.none)
+slWaveStop = input.bool(true, "ดึง SL มาชิดเส้นตัดสินคลื่น", group=gPlan, display = display.none,
+     tooltip="หลุดเส้นตัดสินเมื่อไร = เหตุผลที่เข้าไม้หมดอายุ · เปิดไว้ SL จะไม่วางไกลเกินจุดนั้น (LONG ไม่ต่ำกว่า / SHORT ไม่สูงกว่า) แล้วคิด TP เป็น R ใหม่ให้อัตโนมัติ · ปิดถ้าอยากให้ SL กว้างไว้กันไส้เทียน")
+planSideIn = input.string("อัตโนมัติ + ตามโครงสร้างคลื่น", "ฝั่งที่จะวางแผน", options=["อัตโนมัติ + ตามโครงสร้างคลื่น", "อัตโนมัติ (ฝั่งคะแนนนำ)", "Long เท่านั้น", "Short เท่านั้น"], group=gPlan,
+     tooltip="'ตามโครงสร้างคลื่น' = ถ้าคลื่นชี้คนละทางกับคะแนน ให้วางแผนตามคลื่น (คะแนนยังคุมว่าจะเข้าจริงเมื่อไร) · เลือก 'ฝั่งคะแนนนำ' เพื่อกลับไปใช้พฤติกรรมเดิม", display = display.none)
+
+gMulti = "11) ตารางแผนหลาย Timeframe / หลายเหรียญ"
+showMultiTbl = input.bool(true, "แสดงตารางแผน 1D / 4H / 1H", group=gMulti,
+     tooltip="สรุปว่าแต่ละ Timeframe ควรเข้า Long หรือ Short พร้อมจุดเข้า SL TP · อิงราคาล่าสุดแบบเรียลไทม์", display = display.none)
+posMultiIn = input.string("บนขวา", "ตำแหน่งตาราง", options=["บนขวา", "บนซ้าย", "กลางขวา", "กลางซ้าย", "ล่างขวา", "ล่างซ้าย"], group=gMulti, display = display.none)
+posMulti   = posMultiIn == "บนขวา" ? position.top_right : posMultiIn == "บนซ้าย" ? position.top_left : posMultiIn == "กลางขวา" ? position.middle_right : posMultiIn == "กลางซ้าย" ? position.middle_left : posMultiIn == "ล่างขวา" ? position.bottom_right : position.bottom_left
+tfA = input.timeframe("D",   "Timeframe ที่ 1", group=gMulti, display = display.none)
+tfB = input.timeframe("240", "Timeframe ที่ 2", group=gMulti, display = display.none)
+tfC = input.timeframe("60",  "Timeframe ที่ 3", group=gMulti, display = display.none)
+useSym2 = input.bool(true, "เทียบเหรียญที่สองด้วย", group=gMulti, display = display.none)
+sym2    = input.symbol("BINANCE:ADAUSDT", "เหรียญที่สอง", group=gMulti, display = display.none)
+
+inDateRange = time >= startDate and time <= endDate
+
+// วาดตาราง / เส้น / POC บนแท่งไหน
+// strategy ไม่คำนวณแท่งล่าสุด (ที่ยังไม่ปิด) ทันทีที่เปิดกราฟ -> ต้องรอ tick แรก หรือรอแท่งปิด
+// ถ้าใช้ barstate.islast อย่างเดียว ตลาดที่ tick ห่าง (เช่น ADAUSD Bitstamp) จะไม่มีตาราง/เส้นเลยหลัง reload
+// จึงวาดบนแท่งปิดล่าสุด (islastconfirmedhistory) ไว้ก่อน แล้ววาดทับเมื่อแท่งล่าสุดคำนวณจริง
+drawNow = barstate.islast or barstate.islastconfirmedhistory
+
+// ============================================================================
+// TIMEFRAME ใหญ่  (ไม่ repaint : ใช้ค่าของแท่งที่ปิดแล้วเท่านั้น)
+// ============================================================================
+chartSec  = timeframe.in_seconds(timeframe.period)
+htfSecReq = timeframe.in_seconds(htfInput)
+htfRes = htfSecReq > chartSec ? htfInput : chartSec < 604800 ? "W" : "M"
+
+[htfEmaF, htfEmaS, htfClose] = request.security(syminfo.tickerid, htfRes,
+     [ta.ema(close, htfFastLen)[1], ta.ema(close, htfSlowLen)[1], close[1]],
+     lookahead = barmerge.lookahead_on)
+
+htfUp   = htfClose > htfEmaS and htfEmaF > htfEmaS
+htfDown = htfClose < htfEmaS and htfEmaF < htfEmaS
+
+// ============================================================================
+// INDICATORS
+// ============================================================================
+emaFast = ta.ema(close, emaFastLen)
+emaSlow = ta.ema(close, emaSlowLen)
+
+[macdLine, signalLine, histLine] = ta.macd(close, macdFast, macdSlow, macdSignal)
+macdCrossUp   = ta.crossover(macdLine, signalLine)
+macdCrossDown = ta.crossunder(macdLine, signalLine)
+
+rsiValue = ta.rsi(close, rsiLen)
+atrValue = ta.atr(atrLen)
+
+[diPlus, diMinus, adxValue] = ta.dmi(adxLen, adxSmooth)
+
+hasVol = not na(volume) and volume > 0
+volMa  = ta.sma(volume, volLen)
+
+// Pivot สำหรับแนวรับแนวต้าน
+pvHigh = ta.pivothigh(pivLeft, pivRight)
+pvLow  = ta.pivotlow(pivLeft, pivRight)
+
+// ============================================================================
+// โครงสร้างราคา : Break of Structure / Change of Character
+// ----------------------------------------------------------------------------
+// structDir =  1 : ล่าสุดราคาปิดทะลุยอดสวิง (ขาขึ้น)  -> เส้นที่ต้องเฝ้า = ก้นสวิงล่าสุด
+// structDir = -1 : ล่าสุดราคาปิดหลุดก้นสวิง (ขาลง)  -> เส้นที่ต้องเฝ้า = ยอดสวิงล่าสุด
+// เปลี่ยนจาก 1 เป็น -1 (หรือกลับกัน) = จุดกลับตัว   ·  ตัดสินเมื่อแท่งปิดเท่านั้น ไม่ repaint
+// ============================================================================
+rvPh = ta.pivothigh(revLen, revLen)
+rvPl = ta.pivotlow(revLen, revLen)
+var float rvHi = na
+var float rvLo = na
+var int structDir = 0
+if not na(rvPh)
+    rvHi := rvPh
+if not na(rvPl)
+    rvLo := rvPl
+
+bool chochUp = false
+bool chochDn = false
+if barstate.isconfirmed and not na(atrValue)
+    if structDir != 1 and not na(rvHi) and close > rvHi + atrValue * revBuf
+        chochUp   := structDir == -1
+        structDir := 1
+    else if structDir != -1 and not na(rvLo) and close < rvLo - atrValue * revBuf
+        chochDn   := structDir == 1
+        structDir := -1
+
+revLvl = structDir == 1 ? rvLo : structDir == -1 ? rvHi : na   // ปิดผ่านเส้นนี้ = กลับตัว
+structLongOk  = not revFilter or structDir != -1
+structShortOk = not revFilter or structDir !=  1
+
+// ============================================================================
+// เครื่องมือคณิตศาสตร์วิเคราะห์แนวโน้ม
+// ----------------------------------------------------------------------------
+// 1) Holt linear-trend filter = คำตอบ steady-state ของ Kalman filter
+//    สำหรับโมเดล local linear trend  -> ได้ทั้ง "ระดับ" และ "ความเร็ว" ของราคา
+// 2) Kaufman Efficiency Ratio      -> สัดส่วนสัญญาณต่อสัญญาณรบกวน (0-1)
+// 3) R-squared                     -> เทรนด์เป็นเส้นตรงแค่ไหน
+// 4) Z-score                       -> ราคายืดออกจากค่าเฉลี่ยกี่ส่วนเบี่ยงเบน
+// ============================================================================
+var float holtLvl = na
+var float holtTrd = 0.0
+prevLvl = nz(holtLvl, close)
+prevTrd = nz(holtTrd, 0.0)
+holtLvl := holtAlpha * close + (1 - holtAlpha) * (prevLvl + prevTrd)
+holtTrd := holtBeta * (holtLvl - prevLvl) + (1 - holtBeta) * prevTrd
+
+// Efficiency Ratio (Kaufman)
+erDir = math.abs(close - close[erLen])
+erVol = math.sum(math.abs(close - close[1]), erLen)
+effRatio = erVol > 0 ? erDir / erVol : 0.0
+
+// KAMA : ค่าเฉลี่ยที่ปรับความไวเองตาม Efficiency Ratio
+fastSC = 2.0 / (2 + 1)
+slowSC = 2.0 / (30 + 1)
+kamaSC = math.pow(effRatio * (fastSC - slowSC) + slowSC, 2)
+var float kama = na
+kama := na(kama) ? close : kama + kamaSC * (close - kama)
+
+// Linear regression : ความชัน, R-squared, t-statistic
+regCorr  = nz(ta.correlation(close, bar_index, regLen))
+rSquared = math.pow(regCorr, 2)
+regSlope = ta.linreg(close, regLen, 0) - ta.linreg(close, regLen, 1)
+// หมายเหตุ: ไม่ใช้ t-statistic ของความชัน เพราะราคาเป็นข้อมูลที่ autocorrelate
+//          ค่า t จะ "มีนัยสำคัญ" เกือบตลอดเวลา (spurious regression) -> หลอกตา
+
+// Z-score : ราคายืดออกจากค่าเฉลี่ยแค่ไหน
+zSd    = ta.stdev(close, zLen)
+zScore = zSd > 0 ? (close - ta.sma(close, zLen)) / zSd : 0.0
+
+// รวมทิศทาง : ต้องเห็นตรงกันอย่างน้อย 2 ใน 3 วิธี
+dirHolt = holtTrd > 0 ? 1 : holtTrd < 0 ? -1 : 0
+dirReg  = regSlope > 0 ? 1 : regSlope < 0 ? -1 : 0
+dirKama = close > kama ? 1 : close < kama ? -1 : 0
+dirSum  = dirHolt + dirReg + dirKama
+mathDir = math.abs(dirSum) >= 2 ? (dirSum > 0 ? 1 : -1) : 0
+
+// ความเชื่อมั่น 0-100 : ความสะอาดของเทรนด์ x ความเป็นเส้นตรง x ความชัน x ความเห็นตรงกัน
+slopeAtr  = atrValue > 0 ? regSlope / atrValue : 0.0
+strComp   = math.min(math.abs(slopeAtr) / slopeRef, 1.0)
+agreeFrac = math.abs(dirSum) / 3.0
+mathConf  = int(math.round(100 * (0.35 * effRatio + 0.35 * rSquared + 0.30 * strComp) * agreeFrac))
+
+// ============================================================================
+// ช่วงราคาที่คาด  (พยากรณ์ "ความผันผวน" ไม่ใช่ "ทิศทาง")
+// ----------------------------------------------------------------------------
+// ยึดราคาปัจจุบันเป็นศูนย์กลาง (random walk) แล้วกางช่วงตาม σ ต่อแท่ง x sqrt(จำนวนแท่ง)
+// พร้อมวัดย้อนหลังว่าราคาอยู่ในช่วงจริงกี่ % -> ถ้าต่ำกว่าเป้ามาก แปลว่าหางอ้วน ควรขยาย projZ
+// ============================================================================
+sigmaBar  = ta.stdev(ta.change(close), 100)
+noiseBand = nz(sigmaBar) * math.sqrt(projBars)
+bandOnly  = noiseBand * projZ
+rangeUp   = close + bandOnly
+rangeDn   = close - bandOnly
+
+// calibration : ย้อนหลังแล้วราคาอยู่ในช่วงที่ทำนายไว้จริงกี่ %
+naivePast = close[projBars]
+bandPast  = bandOnly[projBars]
+inBand    = na(bandPast) or na(naivePast) or bandPast == 0 ? na : (math.abs(close - naivePast) <= bandPast ? 1.0 : 0.0)
+coverage  = ta.sma(inBand, accLen) * 100
+// เป้าความครอบคลุมตามทฤษฎี = erf(z/√2)  (Abramowitz-Stegun 7.1.26)
+f_normCov(z) =>
+    x = math.abs(z) / math.sqrt(2)
+    t = 1.0 / (1.0 + 0.3275911 * x)
+    1.0 - ((((1.061405429 * t - 1.453152027) * t + 1.421413741) * t - 0.284496736) * t + 0.254829592) * t * math.exp(-x * x)
+targetCov = int(math.round(100 * f_normCov(projZ)))
+
+// ============================================================================
+// สถานะแนวโน้ม
+// ============================================================================
+baseUp   = useHtf ? htfUp   : true
+baseDown = useHtf ? htfDown : true
+
+trendUp   = baseUp   and mathDir ==  1 and mathConf >= confMin
+trendDown = baseDown and mathDir == -1 and mathConf >= confMin
+trendState = trendUp ? 1 : trendDown ? -1 : 0
+
+trendTxt = trendState == 1 ? "🔼 ขาขึ้น" : trendState == -1 ? "🔽 ขาลง" : mathDir == 1 ? "↗ ขาขึ้นแต่ยังไม่ยืนยัน" : mathDir == -1 ? "↘ ขาลงแต่ยังไม่ยืนยัน" : "↔ ไม่มีทิศทาง"
+trendCol = trendState == 1 ? cUpS : trendState == -1 ? cDnS : cNeuS
+
+// ============================================================================
+// อ่านสถานะเทรนด์ของ Timeframe อื่น (D1 / 1W)  - ใช้ค่าของแท่งที่ปิดแล้ว ไม่ repaint
+// ============================================================================
+f_tfState() =>
+    ef  = ta.ema(close, emaFastLen)
+    es  = ta.ema(close, emaSlowLen)
+    sl  = ta.linreg(close, regLen, 0) - ta.linreg(close, regLen, 1)
+    ds  = (ef > es ? 1 : ef < es ? -1 : 0) + (sl > 0 ? 1 : sl < 0 ? -1 : 0) + (close > es ? 1 : close < es ? -1 : 0)
+    dd  = math.abs(ds) >= 2 ? (ds > 0 ? 1 : -1) : 0
+    dd[1]
+
+tf1Dir = request.security(syminfo.tickerid, mtfTf1, f_tfState(), lookahead = barmerge.lookahead_on)
+tf2Dir = request.security(syminfo.tickerid, mtfTf2, f_tfState(), lookahead = barmerge.lookahead_on)
+
+mtfAlignUp   = tf1Dir ==  1 and tf2Dir ==  1
+mtfAlignDown = tf1Dir == -1 and tf2Dir == -1
+mtfLongOk    = not useMtfFilter or mtfAlignUp
+mtfShortOk   = not useMtfFilter or mtfAlignDown
+
+
+// ============================================================================
+// เครื่องคิดแผนรายไทม์เฟรม  (ใช้กับ 1D / 4H / 1H และเหรียญที่สอง)
+// ----------------------------------------------------------------------------
+// คืนค่า [ฝั่งที่ดีกว่า, คะแนน 0-100, ATR, ราคาล่าสุด]  -> เอาไปคำนวณ เข้า/SL/TP
+// ใช้ lookahead_off : ไม่มีการแอบดูอนาคต แถวของแท่งที่กำลังวิ่งจะอัปเดตสด
+// ============================================================================
+f_plan() =>
+    ef  = ta.ema(close, emaFastLen)
+    es  = ta.ema(close, emaSlowLen)
+    at  = ta.atr(atrLen)
+    rs  = ta.rsi(close, rsiLen)
+    [dp, dm, ax]  = ta.dmi(adxLen, adxSmooth)
+    [ml, sg, hst] = ta.macd(close, macdFast, macdSlow, macdSignal)
+    cr  = nz(ta.correlation(close, bar_index, regLen))
+    r2  = cr * cr
+    slp = ta.linreg(close, regLen, 0) - ta.linreg(close, regLen, 1)
+    ed  = math.abs(close - close[erLen])
+    ev  = math.sum(math.abs(close - close[1]), erLen)
+    er  = ev > 0 ? ed / ev : 0.0
+    ds  = (ef > es ? 1 : ef < es ? -1 : 0) + (slp > 0 ? 1 : slp < 0 ? -1 : 0) + (close > es ? 1 : close < es ? -1 : 0)
+    stc = at > 0 ? math.min(math.abs(slp / at) / slopeRef, 1.0) : 0.0
+    cf  = 100 * (0.35 * er + 0.35 * r2 + 0.30 * stc) * (math.abs(ds) / 3.0)
+    // ความเชื่อมั่นเทรนด์ (cf) ไม่มีทิศ -> ให้คะแนนเฉพาะฝั่งที่เทรนด์ชี้ ไม่แจกให้ทั้งสองฝั่ง
+    scL = (ds >=  2 ? 35 : 0) + (ml > sg ? 20 : 0) + (rs >= rsiLongMin  and rs <= rsiLongMax  ? 15 : 0) + (ax >= adxMin and dp > dm ? 20 : 0) + (ds >=  2 and cf >= confMin ? 10 : 0)
+    scS = (ds <= -2 ? 35 : 0) + (ml < sg ? 20 : 0) + (rs <= rsiShortMax and rs >= rsiShortMin ? 15 : 0) + (ax >= adxMin and dm > dp ? 20 : 0) + (ds <= -2 and cf >= confMin ? 10 : 0)
+    sd  = scL >= scS ? 1 : -1
+    sc  = math.max(scL, scS)
+    [sd, sc, at, close]
+
+sym1 = syminfo.tickerid
+symX = useSym2 ? sym2 : syminfo.tickerid
+
+[aDir, aSc, aAtr, aPx] = request.security(sym1, tfA, f_plan(), lookahead = barmerge.lookahead_off)
+[bDir, bSc, bAtr, bPx] = request.security(sym1, tfB, f_plan(), lookahead = barmerge.lookahead_off)
+[cDir, cSc, cAtr, cPx] = request.security(sym1, tfC, f_plan(), lookahead = barmerge.lookahead_off)
+[xaDir, xaSc, xaAtr, xaPx] = request.security(symX, tfA, f_plan(), lookahead = barmerge.lookahead_off)
+[xbDir, xbSc, xbAtr, xbPx] = request.security(symX, tfB, f_plan(), lookahead = barmerge.lookahead_off)
+[xcDir, xcSc, xcAtr, xcPx] = request.security(symX, tfC, f_plan(), lookahead = barmerge.lookahead_off)
+
+// ============================================================================
+// แนวรับ - แนวต้าน  (จาก pivot ที่ยืนยันแล้ว รวมแนวที่ใกล้กัน)
+// ============================================================================
+var array<float> srLevels = array.new_float()
+
+f_addLevel(arr, lvl, tol, maxN) =>
+    if not na(lvl)
+        dup = false
+        if array.size(arr) > 0
+            for i = 0 to array.size(arr) - 1
+                if math.abs(array.get(arr, i) - lvl) <= tol
+                    dup := true
+                    break
+        if not dup
+            array.push(arr, lvl)
+            if array.size(arr) > maxN
+                array.shift(arr)
+    array.size(arr)
+
+f_nearest(arr, px, above) =>
+    float best = na
+    if array.size(arr) > 0
+        for i = 0 to array.size(arr) - 1
+            v = array.get(arr, i)
+            ok = above ? v > px : v < px
+            if ok and (na(best) or math.abs(v - px) < math.abs(best - px))
+                best := v
+    best
+
+if barstate.isconfirmed
+    f_addLevel(srLevels, pvHigh, atrValue * srMergeAtr, srMax)
+    f_addLevel(srLevels, pvLow,  atrValue * srMergeAtr, srMax)
+
+nearRes = f_nearest(srLevels, close, true)
+nearSup = f_nearest(srLevels, close, false)
+
+resRoom = na(nearRes) ? 99.0 : (nearRes - close) / atrValue
+supRoom = na(nearSup) ? 99.0 : (close - nearSup) / atrValue
+
+// ============================================================================
+// โครงสร้างคลื่น ELLIOTT  (ZigZag -> ตรวจกฎเหล็ก -> ประมาณเป้าหมาย)
+// ----------------------------------------------------------------------------
+// ใช้เฉพาะจุดกลับตัวที่ "ยืนยันแล้ว" (pivot ที่ครบ ewDepth แท่งทั้งสองข้าง)
+// จึงไม่ repaint และไม่เปลี่ยนคำตอบไปมาทุกแท่ง = วิเคราะห์น้อยครั้งแต่ชัวร์
+//
+// กฎเหล็ก 3 ข้อที่ใช้คัดว่าเป็น impulse จริง (ผิดข้อใดข้อหนึ่ง = ไม่นับ)
+//   1) คลื่น 2 ไม่ย้อนเกินจุดเริ่มของคลื่น 1
+//   2) คลื่น 4 ไม่ทับแดนราคาของคลื่น 1
+//   3) คลื่น 3 ไม่ใช่คลื่นที่สั้นที่สุดใน 1 / 3 / 5
+// ============================================================================
+var array<float> zzP = array.new_float()   // ราคาจุดกลับตัว
+var array<int>   zzB = array.new_int()     // bar_index ของจุดนั้น
+var array<int>   zzD = array.new_int()     // 1 = ยอด, -1 = ก้น
+var array<float> zzR = array.new_float()   // RSI ณ จุดนั้น (ไว้หาไดเวอร์เจนซ์)
+
+f_zzAdd(pArr, bArr, dArr, rArr, px, bx, dir, rs) =>
+    n = array.size(pArr)
+    bool same = false
+    if n > 0
+        same := array.get(dArr, n - 1) == dir
+    if same
+        prev = array.get(pArr, n - 1)
+        if (dir == 1 and px > prev) or (dir == -1 and px < prev)
+            array.set(pArr, n - 1, px)
+            array.set(bArr, n - 1, bx)
+            array.set(rArr, n - 1, rs)
+    else
+        array.push(pArr, px)
+        array.push(bArr, bx)
+        array.push(dArr, dir)
+        array.push(rArr, rs)
+        if array.size(pArr) > 16
+            array.shift(pArr)
+            array.shift(bArr)
+            array.shift(dArr)
+            array.shift(rArr)
+    array.size(pArr)
+
+f_zf(arr, k) =>
+    float v = na
+    if array.size(arr) > k
+        v := array.get(arr, array.size(arr) - 1 - k)
+    v
+
+f_zi(arr, k) =>
+    int v = 0
+    if array.size(arr) > k
+        v := array.get(arr, array.size(arr) - 1 - k)
+    v
+
+ewPh = ta.pivothigh(ewDepth, ewDepth)
+ewPl = ta.pivotlow(ewDepth, ewDepth)
+
+if ewOn and barstate.isconfirmed
+    if not na(ewPh)
+        f_zzAdd(zzP, zzB, zzD, zzR, ewPh, bar_index - ewDepth, 1, rsiValue[ewDepth])
+    if not na(ewPl)
+        f_zzAdd(zzP, zzB, zzD, zzR, ewPl, bar_index - ewDepth, -1, rsiValue[ewDepth])
+
+// e0 = จุดกลับตัวล่าสุด, e1 = ก่อนหน้า ...
+e0 = f_zf(zzP, 0)
+e1 = f_zf(zzP, 1)
+e2 = f_zf(zzP, 2)
+e3 = f_zf(zzP, 3)
+e4 = f_zf(zzP, 4)
+e5 = f_zf(zzP, 5)
+e6 = f_zf(zzP, 6)
+d0 = f_zi(zzD, 0)
+
+// ---- ตัวตรวจรูปแบบ : s = 1 คือ impulse ขาขึ้น, s = -1 คือขาลง ----
+// impulse ครบ 5 คลื่น (P0..P5)
+f_imp6(p0, p1, p2, p3, p4, p5, s, minSz) =>
+    w1 = (p1 - p0) * s
+    w2 = (p1 - p2) * s
+    w3 = (p3 - p2) * s
+    w4 = (p3 - p4) * s
+    w5 = (p5 - p4) * s
+    r2 = w1 > 0 ? w2 / w1 : 9.0
+    r4 = w3 > 0 ? w4 / w3 : 9.0
+    okSize  = not na(p0) and w1 > minSz and w3 > minSz and w5 > 0
+    okRule1 = (p2 - p0) * s > 0
+    okRule2 = (p4 - p1) * s > 0
+    okRule3 = not (w3 < w1 and w3 < w5)
+    okNew   = (p3 - p1) * s > 0 and (p5 - p3) * s > 0
+    okRet   = r2 > 0.15 and r2 < 0.95 and r4 > 0.10 and r4 < 0.85
+    okSize and okRule1 and okRule2 and okRule3 and okNew and okRet
+
+// จบคลื่น 4 แล้ว กำลังเดินคลื่น 5 (P0..P4)
+f_imp5(p0, p1, p2, p3, p4, s, minSz, px) =>
+    w1 = (p1 - p0) * s
+    w2 = (p1 - p2) * s
+    w3 = (p3 - p2) * s
+    w4 = (p3 - p4) * s
+    r2 = w1 > 0 ? w2 / w1 : 9.0
+    r4 = w3 > 0 ? w4 / w3 : 9.0
+    okSize  = not na(p0) and w1 > minSz and w3 > minSz
+    okRule1 = (p2 - p0) * s > 0
+    okRule2 = (p4 - p1) * s > 0
+    okNew   = (p3 - p1) * s > 0
+    okBig3  = w3 >= w1 * 0.9
+    okRet   = r2 > 0.15 and r2 < 0.95 and r4 > 0.10 and r4 < 0.85
+    okNow   = (px - p4) * s > minSz * 0.15
+    okSize and okRule1 and okRule2 and okNew and okBig3 and okRet and okNow
+
+// จบคลื่น 3 แล้ว กำลังพักตัวเป็นคลื่น 4 (P0..P3)
+f_imp4(p0, p1, p2, p3, s, minSz, px) =>
+    w1 = (p1 - p0) * s
+    w2 = (p1 - p2) * s
+    w3 = (p3 - p2) * s
+    r2 = w1 > 0 ? w2 / w1 : 9.0
+    okSize  = not na(p0) and w1 > minSz and w3 > minSz
+    okRule1 = (p2 - p0) * s > 0
+    okNew   = (p3 - p1) * s > 0
+    okBig3  = w3 >= w1 * 0.9
+    okRet   = r2 > 0.15 and r2 < 0.95
+    okNow   = (px - p3) * s < -minSz * 0.15 and (px - p1) * s > 0
+    okSize and okRule1 and okNew and okBig3 and okRet and okNow
+
+// จบคลื่น 2 แล้ว กำลังเดินคลื่น 3 (P0..P2)  = ช่วงที่ทำกำไรดีที่สุด
+f_imp3(p0, p1, p2, s, minSz, px) =>
+    w1 = (p1 - p0) * s
+    w2 = (p1 - p2) * s
+    r2 = w1 > 0 ? w2 / w1 : 9.0
+    okSize  = not na(p0) and w1 > minSz
+    okRule1 = (p2 - p0) * s > 0
+    okRet   = r2 > 0.20 and r2 < 0.95
+    okNow   = (px - p2) * s > minSz * 0.15
+    okSize and okRule1 and okRet and okNow
+
+// ----------------------------------------------------------------------------
+// ตัวตรวจ "คลื่นปรับฐาน A-B-C" (corrective)
+//   s = ทิศของคลื่น A และ C (ทิศที่กำลังปรับฐาน)  |  prior = ขนาดขาใหญ่ที่ถูกปรับฐาน
+//   จุดต่างจาก impulse: คลื่น 4 ห้ามทับแดนคลื่น 1 -- ถ้าทับ = ไม่ใช่คลื่น 4 แต่เป็นคลื่น A
+// ----------------------------------------------------------------------------
+
+// ขนาดขาใหญ่ก่อนจุดเริ่มปรับฐาน : วัดจาก pO ถึงจุดสุดขั้วฝั่งตรงข้ามย้อนหลัง 3 จุด
+f_prior(pO, q1, q2, q3, s) =>
+    float ex = na(q1) ? pO : q1
+    if not na(q2) and (q2 - ex) * s > 0
+        ex := q2
+    if not na(q3) and (q3 - ex) * s > 0
+        ex := q3
+    (na(pO) or na(ex)) ? 0.0 : (ex - pO) * s
+
+// (A) ขาเดิมจบแล้ว กำลังเดินคลื่น A  -- pTop = จุดกลับตัวล่าสุด, p1x = ยอดคลื่น 1 ของขาเดิม
+f_corrA(pTop, pPrev, p1x, s, minSz, px, prior, needBrk) =>
+    goneP  = (px - pTop) * s
+    okSize = not na(pTop) and not na(p1x) and prior > minSz * 2.0
+    okTop  = (pPrev - pTop) * s > 0 and (p1x - pTop) * s > 0   // จุดล่าสุดคือปลายสุดจริง
+    okGo   = goneP > minSz * 0.5
+    okBrk  = not needBrk or (px - p1x) * s > 0                 // หลุดแดนคลื่น 1 = ตัดสิทธิ์คลื่น 4
+    okKeep = goneP < prior * 0.95                              // ยังไม่ลบขาเดิมทั้งขา
+    okSize and okTop and okGo and okBrk and okKeep
+
+// (C) จบ A จบ B แล้ว กำลังเดินคลื่น C
+f_corrC(pO, pA, pB, s, minSz, px, prior) =>
+    wA = (pA - pO) * s
+    wB = (pA - pB) * s
+    rB = wA > 0 ? wB / wA : 9.0
+    okSize = not na(pO) and wA > minSz and prior > minSz * 1.5
+    okB    = (pB - pO) * s > 0                 // B ไม่ทะลุจุดเริ่มปรับฐาน
+    okRetB = rB > 0.20 and rB < 1.05           // zigzag / flat
+    okBig  = prior > wA * 1.2                  // ขาเดิมใหญ่กว่า A ชัด = ปรับฐานจริง
+    okNow  = (px - pB) * s > minSz * 0.15      // ออกเดินคลื่น C แล้ว
+    okKeep = (px - pO) * s < prior
+    okSize and okB and okRetB and okBig and okNow and okKeep
+
+// (C จบ) คลื่น C จบ ราคากลับตัวแล้ว -> เริ่มรอบใหม่ทิศตรงข้ามการปรับฐาน
+f_corrE(pO, pA, pB, pC, s, minSz, px, prior) =>
+    wA = (pA - pO) * s
+    wB = (pA - pB) * s
+    wC = (pC - pB) * s
+    rB = wA > 0 ? wB / wA : 9.0
+    rC = wA > 0 ? wC / wA : 9.0
+    okSize = not na(pO) and wA > minSz and prior > minSz * 1.5
+    okB    = (pB - pO) * s > 0
+    okRetB = rB > 0.20 and rB < 1.05
+    okRetC = rC > 0.50 and rC < 2.20           // C ยาว 0.5 - 2.2 เท่าของ A
+    okBig  = prior > wA * 1.2
+    okDeep = (pC - pA) * s > -minSz * 0.30     // C ทะลุปลาย A (zigzag) หรือเสมอ (flat)
+    okKeep = (pC - pO) * s < prior * 1.05
+    okTurn = (pC - px) * s > minSz * 0.20      // กลับตัวออกจากปลาย C แล้ว
+    okSize and okB and okRetB and okRetC and okBig and okDeep and okKeep and okTurn
+
+// ป้ายกำกับจุด : impulse = 0 1 2 3 ...  |  ปรับฐาน = 0 A B C
+f_ewLab(idx, isCorr) =>
+    isCorr ? (idx == 1 ? "A" : idx == 2 ? "B" : idx == 3 ? "C" : str.tostring(idx)) : str.tostring(idx)
+
+minSwing = atrValue * ewMinAtr
+sA = d0        // จุดล่าสุดเป็นปลายคลื่น 3 หรือ 5 (ทิศเดียวกับ impulse)
+sB = -d0       // จุดล่าสุดเป็นปลายคลื่น 2 หรือ 4 (ทิศสวน impulse)
+
+corrFirst = ewRead == "เอนไปทางปรับฐาน A-B-C"
+
+ok6 = ewOn and f_imp6(e5, e4, e3, e2, e1, e0, sA, minSwing)
+ok5 = ewOn and not ok6 and f_imp5(e4, e3, e2, e1, e0, sB, minSwing, close)
+
+// ขาใหญ่ที่กำลังถูกปรับฐาน (แต่ละกรณีจุดเริ่มปรับฐานคนละจุด)
+priCE = f_prior(e3, e4, e5, e6, sA)   // C จบแล้ว      : เริ่มปรับฐานที่ e3
+priCC = f_prior(e2, e3, e4, e5, sB)   // กำลังเดิน C   : เริ่มปรับฐานที่ e2
+priCA = f_prior(e0, e1, e2, e3, sB)   // กำลังเดิน A   : เริ่มปรับฐานที่ e0
+
+imp4Raw = ewOn and not ok6 and not ok5 and f_imp4(e3, e2, e1, e0, sA, minSwing, close)
+
+// "พักคลื่น 4" กับ "ปรับฐาน A-B-C" ใช้จุดกลับตัวชุดเดียวกัน ต่างกันที่มุมมอง -> ให้ผู้ใช้เลือกได้
+okCE = ewOn and ewCorrOn and not ok6 and not ok5 and (corrFirst or not imp4Raw) and f_corrE(e3, e2, e1, e0, sA, minSwing, close, priCE)
+okCC = ewOn and ewCorrOn and not ok6 and not ok5 and not okCE and (corrFirst or not imp4Raw) and f_corrC(e2, e1, e0, sB, minSwing, close, priCC)
+okCA = ewOn and ewCorrOn and not ok6 and not ok5 and not okCE and not okCC and (corrFirst or not imp4Raw) and f_corrA(e0, e1, e2, sB, minSwing, close, priCA, not corrFirst)
+
+ok4 = imp4Raw and not okCE and not okCC and not okCA
+ok3 = ewOn and not ok6 and not ok5 and not ok4 and not okCE and not okCC and not okCA and f_imp3(e2, e1, e0, sB, minSwing, close)
+
+bool ewCorr = okCE or okCC or okCA
+int ewPts = ok6 ? 6 : ok5 ? 5 : ok4 ? 4 : okCE ? 4 : okCC ? 3 : okCA ? 1 : ok3 ? 3 : 0
+int ewS   = ok6 ? sA : ok5 ? sB : ok4 ? sA : okCE ? -sA : okCC ? sB : okCA ? sB : ok3 ? sB : 0
+
+// ---- ความยาวคลื่นสำคัญ + เป้าหมายถัดไป (ตามอัตราส่วนฟีโบนักชีมาตรฐาน) ----
+float ewTarget = na
+float ewAlt    = na
+float ewInval  = na
+string ewTxt   = "ยังอ่านคลื่นไม่ออก"
+string ewNote  = "-"
+int ewRaw      = 0
+int ewBiasRaw  = 0
+float ewSize   = 0.0
+
+if ok6
+    wAll = (e0 - e5) * sA
+    ewTarget := e0 - sA * 0.500 * wAll
+    ewAlt    := e0 - sA * 0.382 * wAll
+    ewTxt    := sA == 1 ? "จบคลื่น 5 ขาขึ้น → คาดปรับฐาน" : "จบคลื่น 5 ขาลง → คาดเด้งกลับ"
+    ewNote   := "ปรับฐาน 0.382 ที่ " + str.tostring(ewAlt, format.mintick)
+    ewRaw    := 80
+    ewBiasRaw := -sA
+    ewSize   := wAll
+else if ok5
+    w1 = (e3 - e4) * sB
+    w3 = (e1 - e2) * sB
+    ewTarget := e0 + sB * w1
+    ewAlt    := e0 + sB * 0.618 * w3
+    ewTxt    := "กำลังเดินคลื่น 5 " + (sB == 1 ? "ขาขึ้น" : "ขาลง")
+    ewNote   := "ขาสุดท้าย ระวังจบรอบ · alt " + str.tostring(ewAlt, format.mintick)
+    ewRaw    := 72
+    ewBiasRaw := sB
+    ewSize   := w3
+else if ok4
+    w3 = (e0 - e1) * sA
+    ewTarget := e0 - sA * 0.382 * w3
+    ewAlt    := e0 - sA * 0.500 * w3
+    ewTxt    := "พักตัวคลื่น 4 (" + (sA == 1 ? "เทรนด์ขึ้น" : "เทรนด์ลง") + ")"
+    ewNote   := "รอจบย่อโซน " + str.tostring(ewAlt, format.mintick) + " แล้วไปคลื่น 5 · ถ้าหลุด " + str.tostring(e2, format.mintick) + " = ไม่ใช่คลื่น 4 แต่เป็นคลื่น A (รอ B แล้วไป C)"
+    ewInval  := e2
+    ewRaw    := 70
+    ewBiasRaw := sA
+    ewSize   := w3
+else if ok3
+    w1 = (e1 - e2) * sB
+    ewTarget := e0 + sB * 1.618 * w1
+    ewAlt    := e0 + sB * 2.618 * w1
+    ewTxt    := "กำลังเดินคลื่น 3 " + (sB == 1 ? "ขาขึ้น" : "ขาลง")
+    ewNote   := "คลื่นแรงที่สุด · ขยาย 2.618 ที่ " + str.tostring(ewAlt, format.mintick)
+    ewRaw    := 68
+    ewBiasRaw := sB
+    ewSize   := w1
+else if okCE
+    wTot = (e0 - e3) * sA                       // ขนาดการปรับฐานทั้งหมด A ถึง C (บวกเสมอ)
+    ewTarget := e0 - sA * 0.618 * wTot
+    ewAlt    := e3
+    ewTxt    := "จบคลื่น C แล้ว → กลับเป็น" + (sA == 1 ? "ขาลง" : "ขาขึ้น")
+    ewNote   := "ปรับฐาน A-B-C จบ · เด้ง 0.618 ที่ " + str.tostring(ewTarget, format.mintick) + " · กลับจุดเริ่ม " + str.tostring(e3, format.mintick)
+    ewRaw    := 74
+    ewBiasRaw := -sA
+    ewSize   := wTot
+    ewInval  := e0                              // หลุดปลาย C = ปรับฐานยังไม่จบ
+else if okCC
+    wAc  = (e1 - e2) * sB
+    dnC  = wAc > 0 ? ((close - e0) * sB) / wAc : 0.0
+    ewTarget := e0 + sB * wAc                   // C = A (พบบ่อยสุด)
+    ewAlt    := e0 + sB * 1.618 * wAc           // C = 1.618A (ซิกแซกยาว)
+    ewTxt    := "ปรับฐาน A-B-C · กำลังเดินคลื่น C " + (sB == 1 ? "ขาขึ้น" : "ขาลง")
+    ewNote   := "C=A ที่ " + str.tostring(ewTarget, format.mintick) + " · ถ้ายาว 1.618A ที่ " + str.tostring(ewAlt, format.mintick) + " → จบ C แล้วกลับเป็น" + (sB == 1 ? "ขาลง" : "ขาขึ้น") + (dnC >= 0.85 ? " · ใกล้จบ C แล้ว อย่าไล่ตาม" : "")
+    ewRaw    := 66
+    ewBiasRaw := dnC >= 0.85 ? 0 : sB
+    ewSize   := wAc
+    ewInval  := e2                              // ทะลุจุดเริ่มปรับฐาน = ไม่ใช่ A-B-C
+else if okCA
+    gnA  = (close - e0) * sB                    // เดินมาแล้วเท่าไรของขาเดิม
+    // เป้าคลื่น A = ระดับฟีโบต่อไปที่ราคายังไม่ถึง (เลื่อนตามราคา ไม่ชี้ย้อนหลัง)
+    ewTarget := gnA < 0.382 * priCA ? e0 + sB * 0.382 * priCA : gnA < 0.500 * priCA ? e0 + sB * 0.500 * priCA : e0 + sB * 0.618 * priCA
+    ewAlt    := gnA < 0.382 * priCA ? e0 + sB * 0.500 * priCA : gnA < 0.500 * priCA ? e0 + sB * 0.618 * priCA : e0 + sB * 0.786 * priCA
+    ewTxt    := "ปรับฐาน A-B-C · กำลังเดินคลื่น A " + (sB == 1 ? "ขาขึ้น" : "ขาลง")
+    ewNote   := "ขาเดิมจบแล้ว · รอจบ A แถว " + str.tostring(ewTarget, format.mintick) + " (ลึกสุด " + str.tostring(ewAlt, format.mintick) + ") → พัก B → ต่อคลื่น C → จบแล้วกลับเป็น" + (sB == 1 ? "ขาลง" : "ขาขึ้น")
+    ewRaw    := 55
+    ewBiasRaw := sB
+    ewSize   := priCA
+    ewInval  := e0                              // กลับไปทะลุจุดเริ่ม = ปรับฐานจบก่อนกำหนด
+
+// ความชัดของคลื่น : รูปแบบสมบูรณ์แค่ไหน + คลื่นใหญ่พอไหม + ตรงกับเครื่องมือคณิตศาสตร์ไหม
+bigSwing = atrValue > 0 and ewSize > atrValue * 2.5
+int ewConf = ewPts == 0 ? 0 : int(math.min(100, ewRaw + (bigSwing ? 10 : 0) + (ewBiasRaw == mathDir ? 10 : 0)))
+int ewBias = ewPts > 0 and ewConf >= ewMinConf ? ewBiasRaw : 0
+if ewPts > 0 and ewConf < ewMinConf
+    ewTxt := ewTxt + " (ยังไม่ชัดพอ)"
+
+// ============================================================================
+// FIBONACCI : โซนย่อของขาล่าสุด (จุดกลับตัว e1 -> e0)
+// ============================================================================
+legUp   = not na(e0) and not na(e1) and e0 > e1
+legHi   = math.max(nz(e0, close), nz(e1, close))
+legLo   = math.min(nz(e0, close), nz(e1, close))
+fibRng  = legHi - legLo
+hasFib  = not na(e0) and not na(e1) and fibRng > atrValue * ewMinAtr
+fib382  = legUp ? legHi - 0.382 * fibRng : legLo + 0.382 * fibRng
+fib500  = legUp ? legHi - 0.500 * fibRng : legLo + 0.500 * fibRng
+fib618  = legUp ? legHi - 0.618 * fibRng : legLo + 0.618 * fibRng
+fib786  = legUp ? legHi - 0.786 * fibRng : legLo + 0.786 * fibRng
+gzTop   = math.max(fib500, fib618)
+gzBot   = math.min(fib500, fib618)
+inGolden    = hasFib and close <= gzTop and close >= gzBot
+goldenLong  = inGolden and legUp
+goldenShort = inGolden and not legUp
+
+// ============================================================================
+// RSI DIVERGENCE ที่จุดกลับตัว (เทียบยอดกับยอด / ก้นกับก้น)
+// ============================================================================
+hiNew  = d0 ==  1 ? e0 : e1
+hiOld  = d0 ==  1 ? e2 : e3
+rHiNew = d0 ==  1 ? f_zf(zzR, 0) : f_zf(zzR, 1)
+rHiOld = d0 ==  1 ? f_zf(zzR, 2) : f_zf(zzR, 3)
+loNew  = d0 == -1 ? e0 : e1
+loOld  = d0 == -1 ? e2 : e3
+rLoNew = d0 == -1 ? f_zf(zzR, 0) : f_zf(zzR, 1)
+rLoOld = d0 == -1 ? f_zf(zzR, 2) : f_zf(zzR, 3)
+
+divFresh = bar_index - f_zi(zzB, 0) <= ewDepth * 3
+bearDiv  = divOn and divFresh and not na(hiOld) and not na(rHiOld) and hiNew > hiOld and rHiNew < rHiOld - divMinRsi
+bullDiv  = divOn and divFresh and not na(loOld) and not na(rLoOld) and loNew < loOld and rLoNew > rLoOld + divMinRsi
+
+// ============================================================================
+// VOLUME PROFILE : หาราคาที่ซื้อขายหนาแน่นสุด (POC) และโซน 70% (Value Area)
+// ----------------------------------------------------------------------------
+// คำนวณใหม่ทุก vpStep แท่ง (ไม่ต้องคิดทุกแท่ง = เบาและนิ่ง)
+// ============================================================================
+var array<float> vpArr = array.new_float(vpBins, 0.0)
+var float pocPx = na
+var float vahPx = na
+var float valPx = na
+var bool  vpNoVol = false
+
+// ใช้เท่าที่มีแท่ง (กราฟ W / M หรือเหรียญใหม่ที่ประวัติไม่ถึง vpLen ก็ยังคำนวณได้)
+// ถ้า Volume เป็น 0 / na ทั้งช่วง (ทอง CFD บางโบรก) -> นับจำนวนแท่งที่ราคาอยู่แทน (time-at-price)
+//   ของเดิมใช้ nz(volume, 1) ซึ่งแก้ได้แค่ na : Volume = 0 ทำให้ทุกชั้นว่าง POC ตกไปก้นกรอบ หลุดจอ
+if showVP and bar_index >= 20 and (bar_index % vpStep == 0 or drawNow)
+    n = math.min(vpLen, bar_index + 1)
+    float hiV = na
+    float loV = na
+    float volSum = 0.0
+    for i = 0 to n - 1
+        hiV := na(hiV) ? high[i] : math.max(hiV, nz(high[i], hiV))
+        loV := na(loV) ? low[i]  : math.min(loV, nz(low[i],  loV))
+        volSum += nz(volume[i])
+    if not na(hiV) and not na(loV) and hiV > loV
+        useVol = volSum > 0
+        array.fill(vpArr, 0.0)
+        stepPx = (hiV - loV) / vpBins
+        for i = 0 to n - 1
+            px = (high[i] + low[i] + close[i]) / 3.0
+            if not na(px)
+                vv = useVol ? nz(volume[i]) : 1.0
+                bi = math.max(0, math.min(vpBins - 1, int(math.floor((px - loV) / stepPx))))
+                array.set(vpArr, bi, array.get(vpArr, bi) + vv)
+        mx    = array.max(vpArr)
+        total = array.sum(vpArr)
+        pi    = array.indexof(vpArr, mx)
+        acc   = mx
+        loI   = pi
+        hiI   = pi
+        guard = 0
+        while acc < total * 0.7 and guard < vpBins * 2 and (loI > 0 or hiI < vpBins - 1)
+            float vL = -1.0
+            float vH = -1.0
+            if loI > 0
+                vL := array.get(vpArr, loI - 1)
+            if hiI < vpBins - 1
+                vH := array.get(vpArr, hiI + 1)
+            if vH >= vL
+                hiI := hiI + 1
+                acc := acc + vH
+            else
+                loI := loI - 1
+                acc := acc + vL
+            guard := guard + 1
+        pocPx   := loV + (pi + 0.5) * stepPx
+        vahPx   := loV + (hiI + 1) * stepPx
+        valPx   := loV + loI * stepPx
+        vpNoVol := not useVol
+
+vpOk    = showVP and not na(pocPx)
+nearPoc = vpOk and math.abs(close - pocPx) <= atrValue * 0.5
+nearVal = vpOk and math.abs(close - valPx) <= atrValue * 0.75
+nearVah = vpOk and math.abs(close - vahPx) <= atrValue * 0.75
+
+// ============================================================================
+// CONFLUENCE : นับว่าตอนนี้มีหลักฐานหนุนกี่อย่าง (ยิ่งหลายอย่างพร้อมกัน ยิ่งชัวร์)
+// ============================================================================
+int confLN = (goldenLong ? 1 : 0) + (bullDiv ? 1 : 0) + ((nearVal or nearPoc) ? 1 : 0)
+int confSN = (goldenShort ? 1 : 0) + (bearDiv ? 1 : 0) + ((nearVah or nearPoc) ? 1 : 0)
+
+
+// ============================================================================
+// ระบบให้คะแนน (รวม 100)
+// ============================================================================
+W_HTF   = 22   // เทรนด์ Timeframe ใหญ่
+W_MATH  = 18   // เครื่องมือคณิตศาสตร์ (Holt + Regression + KAMA เห็นตรงกัน)
+W_WAVE  = 10   // โครงสร้างคลื่น Elliott หนุนทิศนี้
+W_ADX   = 9
+W_MACD  = 8
+W_RSI   = 8
+W_VOL   = 8
+W_SR    = 8
+W_CONF  = 5    // หลักฐานร่วม (โซนทอง Fib / ไดเวอร์เจนซ์ / โซน Volume Profile)
+W_EXT   = 4    // ราคายังไม่ยืดเกินไป (z-score)
+
+fLHtf   = useHtf ? htfUp : true
+fLMath  = mathDir == 1 and mathConf >= confMin
+fLExt   = zScore <= zMax
+fLMacd  = macdLine > signalLine and histLine > histLine[1]
+fLRsi   = rsiValue >= rsiLongMin and rsiValue <= rsiLongMax
+fLAdx   = adxValue >= adxMin and diPlus > diMinus
+fLVol   = hasVol ? volume > volMa * volMult : true
+fLSr    = not useSrFilter or resRoom >= srMinAtr
+fLWave  = ewBias ==  1
+fLWaveN = ewBias ==  1 ? W_WAVE : ewBias == 0 ? 5 : 0
+fLConf  = confLN >= 2
+fLConfN = confLN >= 2 ? W_CONF : confLN == 1 ? 3 : 0
+
+fSHtf   = useHtf ? htfDown : true
+fSMath  = mathDir == -1 and mathConf >= confMin
+fSExt   = zScore >= -zMax
+fSMacd  = macdLine < signalLine and histLine < histLine[1]
+fSRsi   = rsiValue <= rsiShortMax and rsiValue >= rsiShortMin
+fSAdx   = adxValue >= adxMin and diMinus > diPlus
+fSVol   = hasVol ? volume > volMa * volMult : true
+fSSr    = not useSrFilter or supRoom >= srMinAtr
+fSWave  = ewBias == -1
+fSWaveN = ewBias == -1 ? W_WAVE : ewBias == 0 ? 5 : 0
+fSConf  = confSN >= 2
+fSConfN = confSN >= 2 ? W_CONF : confSN == 1 ? 3 : 0
+
+longScore  = (fLHtf ? W_HTF : 0) + (fLMath ? W_MATH : 0) + fLWaveN + (fLMacd ? W_MACD : 0) + (fLRsi ? W_RSI : 0) + (fLAdx ? W_ADX : 0) + (fLVol ? W_VOL : 0) + (fLSr ? W_SR : 0) + fLConfN + (fLExt ? W_EXT : 0)
+shortScore = (fSHtf ? W_HTF : 0) + (fSMath ? W_MATH : 0) + fSWaveN + (fSMacd ? W_MACD : 0) + (fSRsi ? W_RSI : 0) + (fSAdx ? W_ADX : 0) + (fSVol ? W_VOL : 0) + (fSSr ? W_SR : 0) + fSConfN + (fSExt ? W_EXT : 0)
+
+// ============================================================================
+// เงื่อนไขเข้าเทรด
+// ============================================================================
+crossUpRecent   = nz(ta.barssince(macdCrossUp),   9999) <= crossLookback
+crossDownRecent = nz(ta.barssince(macdCrossDown), 9999) <= crossLookback
+
+var int lastEntryBar = na
+cooldownOk = na(lastEntryBar) or (bar_index - lastEntryBar) >= cooldownBars
+barOk      = confirmOnClose ? barstate.isconfirmed : true
+
+ewLongOk  = not ewFilter or ewBias !=  -1
+ewShortOk = not ewFilter or ewBias !=   1
+
+longSignal  = allowLong  and inDateRange and crossUpRecent   and longScore  >= minScore and mtfLongOk  and ewLongOk  and structLongOk
+shortSignal = allowShort and inDateRange and crossDownRecent and shortScore >= minScore and mtfShortOk and ewShortOk and structShortOk
+
+longCondition  = longSignal  and cooldownOk and barOk and strategy.position_size <= 0
+shortCondition = shortSignal and cooldownOk and barOk and strategy.position_size >= 0
+
+
+// ============================================================================
+// สั่งออเดอร์
+// ============================================================================
+var float longSL    = na
+var float longTP    = na
+var float shortSL   = na
+var float shortTP   = na
+var float riskAmt   = na
+var float trailLong = na
+var float trailShrt = na
+if longCondition
+    strategy.entry("Long", strategy.long,
+         alert_message = "{{ticker}} LONG | score " + str.tostring(longScore) + "/100 | " + timeframe.period)
+    riskAmt := atrValue * atrMultSL
+    longSL  := close - riskAmt
+    longTP  := close + riskAmt * riskReward
+    trailLong := na
+    lastEntryBar := bar_index
+    if showLabels
+        label.new(bar_index, low, "BUY " + str.tostring(longScore), yloc=yloc.belowbar, style=label.style_label_up, color=color.new(cUpS, 12), textcolor=#FFFFFF, size=size.small)
+
+if shortCondition
+    strategy.entry("Short", strategy.short,
+         alert_message = "{{ticker}} SHORT | score " + str.tostring(shortScore) + "/100 | " + timeframe.period)
+    riskAmt := atrValue * atrMultSL
+    shortSL := close + riskAmt
+    shortTP := close - riskAmt * riskReward
+    trailShrt := na
+    lastEntryBar := bar_index
+    if showLabels
+        label.new(bar_index, high, "SELL " + str.tostring(shortScore), yloc=yloc.abovebar, style=label.style_label_down, color=color.new(cDnS, 12), textcolor=#FFFFFF, size=size.small)
+
+// ============================================================================
+// บริหารไม้ที่ถืออยู่  (อัปเดตทุก tick -> เรียลไทม์)
+// ============================================================================
+// Chandelier : วัดจากจุดสูงสุด/ต่ำสุด "หลังเข้าไม้" เท่านั้น
+// (ถ้าใช้ High ย้อนหลัง N แท่งที่รวมก่อนเข้าไม้ stop อาจอยู่เหนือราคาทันทีที่เข้า)
+var float hiSince = na
+var float loSince = na
+
+if strategy.position_size == 0
+    trailLong := na
+    trailShrt := na
+    hiSince   := na
+    loSince   := na
+
+if strategy.position_size > 0
+    avgPx = strategy.position_avg_price
+    // แท่งแรกที่ไม้เปิดจริง -> ตั้ง SL ใหม่จากราคาเข้าจริง
+    if strategy.position_size[1] <= 0
+        longSL  := avgPx - riskAmt
+        longTP  := avgPx + riskAmt * riskReward
+        hiSince := high
+        trailLong := na
+    hiSince   := math.max(nz(hiSince, high), high)
+    chLong     = hiSince - atrValue * trailMult
+    trailLong := na(trailLong) ? chLong : math.max(trailLong, chLong)
+    effStop = nz(longSL, avgPx - riskAmt)
+    if useBE and close >= avgPx + riskAmt
+        effStop := math.max(effStop, avgPx)
+    if tpMode == MODE_FIX
+        strategy.exit("Exit Long", from_entry="Long", stop=effStop, limit=longTP)
+    else
+        effStop := math.max(effStop, nz(trailLong, effStop))
+        if tpMode == MODE_MIX
+            // TP1 ต้องใช้ stop ตัวเดียวกับส่วนที่เหลือ ไม่งั้นครึ่งหนึ่งของไม้ค้างอยู่กับ stop เก่า
+            strategy.exit("TP1 Long", from_entry="Long", qty_percent=tp1Pct, limit=avgPx + riskAmt * tp1R, stop=effStop)
+        strategy.exit("Exit Long", from_entry="Long", stop=effStop)
+    longSL := effStop
+
+if strategy.position_size < 0
+    avgPx = strategy.position_avg_price
+    if strategy.position_size[1] >= 0
+        shortSL := avgPx + riskAmt
+        shortTP := avgPx - riskAmt * riskReward
+        loSince := low
+        trailShrt := na
+    loSince   := math.min(nz(loSince, low), low)
+    chShort    = loSince + atrValue * trailMult
+    trailShrt := na(trailShrt) ? chShort : math.min(trailShrt, chShort)
+    effStop = nz(shortSL, avgPx + riskAmt)
+    if useBE and close <= avgPx - riskAmt
+        effStop := math.min(effStop, avgPx)
+    if tpMode == MODE_FIX
+        strategy.exit("Exit Short", from_entry="Short", stop=effStop, limit=shortTP)
+    else
+        effStop := math.min(effStop, nz(trailShrt, effStop))
+        if tpMode == MODE_MIX
+            strategy.exit("TP1 Short", from_entry="Short", qty_percent=tp1Pct, limit=avgPx - riskAmt * tp1R, stop=effStop)
+        strategy.exit("Exit Short", from_entry="Short", stop=effStop)
+    shortSL := effStop
+
+// ปิดทันทีเมื่อโครงสร้างราคากลับข้าง (เร็วกว่ารอ trailing / TF ใหญ่)
+if exitOnRev and chochDn and strategy.position_size > 0
+    strategy.close("Long", comment="Trend Reversal")
+
+if exitOnRev and chochUp and strategy.position_size < 0
+    strategy.close("Short", comment="Trend Reversal")
+
+// ปิดก่อนถ้าเทรนด์ TF ใหญ่กลับข้าง
+if strategy.position_size > 0 and useHtf and htfDown
+    strategy.close("Long", comment="HTF Reversal")
+
+if strategy.position_size < 0 and useHtf and htfUp
+    strategy.close("Short", comment="HTF Reversal")
+
+// ============================================================================
+// แผนเทรด : คาดการณ์ "จุดเข้า" และ "จุดออก" ล่วงหน้า
+// ----------------------------------------------------------------------------
+// ถือไม้อยู่  -> ใช้ราคาเข้าจริง + stop ที่ใช้อยู่จริง + เป้าถัดไป
+// ยังไม่มีไม้ -> เลือกฝั่งที่คะแนนนำ แล้วเสนอราคาที่ควรเข้าตามโครงสร้างราคา
+//                (เข้าเลย / รอย่อเข้าโซนทอง / รอทะลุยอด-หลุดก้น) พร้อม SL และ TP
+// SL วางตามโครงสร้าง (ใต้ก้น / เหนือยอดล่าสุด) แต่ไม่เกิน 2 เท่าของ ATR stop
+// ============================================================================
+swLowRef  = d0 == -1 ? e0 : e1        // ก้นสวิงล่าสุด
+swHighRef = d0 ==  1 ? e0 : e1        // ยอดสวิงล่าสุด
+fbLow     = ta.lowest(low, 20)
+fbHigh    = ta.highest(high, 20)
+pivLowRef  = na(swLowRef)  ? fbLow  : swLowRef
+pivHighRef = na(swHighRef) ? fbHigh : swHighRef
+
+inPos   = strategy.position_size != 0
+posLong = strategy.position_size > 0
+
+bestSide = longScore >= shortScore ? 1 : -1
+forceSide = planSideIn == "Long เท่านั้น" ? 1 : planSideIn == "Short เท่านั้น" ? -1 : 0
+
+// คะแนนกับคลื่นชี้คนละทางได้ (คะแนนอ่านโมเมนตัมตอนนี้ · คลื่นอ่านโครงสร้างรอบใหญ่)
+// โหมด "ตามโครงสร้างคลื่น" = วางแผนฝั่งคลื่น แล้วปล่อยให้คะแนนเป็นตัวคุมว่าจะเข้าจริงเมื่อไร
+followWave   = planSideIn == "อัตโนมัติ + ตามโครงสร้างคลื่น"
+waveOverride = followWave and not inPos and forceSide == 0 and ewBias != 0 and ewBias != bestSide
+int planSide = inPos ? (posLong ? 1 : -1) : (forceSide != 0 ? forceSide : waveOverride ? ewBias : bestSide)
+sgn = planSide
+
+atrRisk    = atrValue * atrMultSL
+structStop = sgn == 1 ? pivLowRef - atrValue * 0.25 : pivHighRef + atrValue * 0.25
+breakLvl   = sgn == 1 ? pivHighRef + atrValue * 0.10 : pivLowRef - atrValue * 0.10
+// "เข้าได้เลย" ต้องตรงกับเงื่อนไขเข้าจริงของ strategy ทุกข้อ (รวมทิศที่อนุญาต / ช่วงวันที่ / ตัวกรอง D1-1W)
+readyNow   = sgn == 1 ? longSignal : shortSignal
+brokenOut  = sgn == 1 ? close > breakLvl : close < breakLvl
+zoneOk     = hasFib and (sgn == 1 ? legUp : not legUp)
+aboveZone  = sgn == 1 ? close > gzTop : close < gzBot
+
+float planEntry = na
+string planTxt  = "-"
+
+if inPos
+    planEntry := strategy.position_avg_price
+    planTxt   := "ถือไม้อยู่ (ราคาเข้าจริง)"
+else if readyNow
+    planEntry := close
+    planTxt   := "เข้าได้เลยที่ราคาตลาด"
+else if zoneOk and aboveZone
+    planEntry := sgn == 1 ? gzTop : gzBot
+    planTxt   := "รอย่อเข้าโซนทอง Fib"
+else if zoneOk and inGolden
+    planEntry := close
+    planTxt   := "อยู่ในโซนทองแล้ว รอแท่งยืนยัน"
+else if brokenOut
+    planEntry := close
+    planTxt   := sgn == 1 ? "ทะลุยอดแล้ว รอคะแนน/สัญญาณยืนยัน" : "หลุดก้นแล้ว รอคะแนน/สัญญาณยืนยัน"
+else
+    planEntry := breakLvl
+    planTxt   := sgn == 1 ? "รอทะลุยอดเดิม" : "รอหลุดก้นเดิม"
+
+if waveOverride
+    planTxt := planTxt + " · พลิกตามคลื่น (คะแนนสวน)"
+if not inPos and structDir != 0 and structDir != sgn
+    planTxt := planTxt + " · ⚠ โครงสร้างยังเป็น" + (structDir == 1 ? "ขาขึ้น" : "ขาลง")
+
+// ---- ระยะเสี่ยง 1R ----
+structR = sgn == 1 ? planEntry - structStop : structStop - planEntry
+float riskDist = math.min(math.max(atrRisk, nz(structR, atrRisk)), atrRisk * 2.0)
+riskDist := math.max(riskDist, atrValue * 0.5)
+if inPos
+    riskDist := nz(riskAmt, atrRisk)
+
+// ---- จุดออก : SL ----
+float planStop = sgn == 1 ? planEntry - riskDist : planEntry + riskDist
+if inPos
+    planStop := posLong ? nz(longSL, planStop) : nz(shortSL, planStop)
+
+// SL ไม่ควรวางไกลเกิน "เส้นตัดสินคลื่น" : ราคาหลุดเส้นนั้นเมื่อไร เหตุผลที่เข้าไม้ก็หมดอายุแล้ว
+// ถ้าดึงเข้ามา ต้องคิด riskDist ใหม่ด้วย ไม่งั้น TP1/TP2 จะไม่ใช่ R จริง
+bool slOnWave = false
+if slWaveStop and not inPos and not na(ewInval) and ewBias == sgn
+    limSL   = sgn == 1 ? ewInval - atrValue * 0.25 : ewInval + atrValue * 0.25
+    tighter = sgn == 1 ? (limSL > planStop and limSL < planEntry) : (limSL < planStop and limSL > planEntry)
+    okRisk  = math.abs(planEntry - limSL) >= atrValue * 0.5
+    if tighter and okRisk
+        planStop := limSL
+        riskDist := math.abs(planEntry - planStop)
+        slOnWave := true
+
+// ---- จุดออก : TP1 (ตาม R) และ TP2 (เป้าคลื่น ถ้าไกลกว่า) ----
+float planTp1 = sgn == 1 ? planEntry + riskDist * tp1R : planEntry - riskDist * tp1R
+float rrTp2   = sgn == 1 ? planEntry + riskDist * riskReward : planEntry - riskDist * riskReward
+capTp2        = sgn == 1 ? planEntry + riskDist * 8.0 : planEntry - riskDist * 8.0
+waveFar       = not na(ewTarget) and (sgn == 1 ? ewTarget > planTp1 : ewTarget < planTp1)
+float planTp2 = waveFar ? (sgn == 1 ? math.min(ewTarget, capTp2) : math.max(ewTarget, capTp2)) : rrTp2
+
+stopPct = planEntry > 0 ? (planStop - planEntry) / planEntry * 100 * sgn : na
+tp2Pct  = planEntry > 0 ? (planTp2 - planEntry) / planEntry * 100 * sgn : na
+planRR  = riskDist > 0 ? math.abs(planTp2 - planEntry) / riskDist : na
+rrTxt   = na(planRR) ? "-" : planRR >= 2.5 ? "คุ้มมาก" : planRR >= 1.5 ? "พอคุ้ม" : "ไม่คุ้ม"
+lockPct = inPos and planEntry > 0 ? (planStop - planEntry) / planEntry * 100 * sgn : na
+// ---- คำตอบตรง ๆ : ถ้าเข้า ณ ตอนนี้ ต้องเป็น LONG หรือ SHORT ----
+nowReady = readyNow
+sideSc = waveOverride ? (sgn == 1 ? longScore : shortScore) : math.max(longScore, shortScore)
+int nowSide = inPos ? (posLong ? 1 : -1) : (nowReady ? sgn : (sideSc >= watchScore ? (waveOverride ? sgn : bestSide) : 0))
+nowAct   = inPos ? "ถือ " + (posLong ? "LONG" : "SHORT") + " อยู่" : nowReady ? "เข้า " + (sgn == 1 ? "LONG" : "SHORT") + " ได้เลย" : nowSide == 1 ? "เอียง LONG · รอจังหวะ" : nowSide == -1 ? "เอียง SHORT · รอจังหวะ" : "ยังไม่ควรเข้า (รอ)"
+nowIcon  = nowSide == 0 ? "⚪" : nowReady or inPos ? (nowSide == 1 ? "🟢" : "🔴") : (nowSide == 1 ? "↗" : "↘")
+nowCol   = nowSide == 0 ? cNeuS : nowSide == 1 ? cUpS : cDnS
+
+planExitTxt = inPos ? "ออกเมื่อชน trailing หรือถึงเป้า" : readyNow ? "พร้อมเข้าแล้ว" : "ยังไม่เข้าเงื่อนไข"
+planStatTxt = inPos ? (nz(lockPct) > 0 ? "ล็อกกำไรแล้ว " + str.tostring(lockPct, "#.#") + "%" : "ถือไม้อยู่ · ยังไม่ถึงทุน") : rrTxt + " · " + planExitTxt
+
+
+// ============================================================================
+// VISUALS : เทรนด์
+// ============================================================================
+pFast = plot(emaFast, "EMA เร็ว", color=color.new(color.orange, 0), linewidth=2)
+pSlow = plot(emaSlow, "EMA ช้า",  color=color.new(color.blue, 0),   linewidth=2)
+ribbonCol = trendState == 1 ? color.new(cUpS, 82) : trendState == -1 ? color.new(cDnS, 82) : color.new(cNeuS, 92)
+fill(pFast, pSlow, color = showRibbon ? ribbonCol : color.new(color.gray, 100), title="โซนเทรนด์")
+
+plot(kama, "KAMA (ปรับความไวเอง)", color=color.new(color.yellow, 0), linewidth=2)
+plot(holtLvl, "Holt/Kalman Level", color=color.new(color.aqua, 0), linewidth=2)
+
+plot(htfEmaS, "EMA ช้า (TF ใหญ่)", color=color.new(color.purple, 20), linewidth=3, style=plot.style_stepline)
+
+bgcolor(useHtf ? (htfUp ? color.new(cUpS, 94) : htfDown ? color.new(cDnS, 94) : na) : na, title="พื้นหลังเทรนด์ TF ใหญ่")
+
+// จุดเปลี่ยนแนวโน้ม
+trendFlipUp   = trendState == 1  and trendState[1] != 1
+trendFlipDown = trendState == -1 and trendState[1] != -1
+
+if showTrendChange and trendFlipUp and barstate.isconfirmed
+    label.new(bar_index, low, "▲ เริ่มขาขึ้น", yloc=yloc.belowbar, style=label.style_label_up, color=color.new(cUpS, 35), textcolor=#FFFFFF, size=size.tiny)
+
+if showTrendChange and trendFlipDown and barstate.isconfirmed
+    label.new(bar_index, high, "▼ เริ่มขาลง", yloc=yloc.abovebar, style=label.style_label_down, color=color.new(cDnS, 35), textcolor=#FFFFFF, size=size.tiny)
+
+// ป้ายจุดกลับตัว (โครงสร้างราคาเปลี่ยนข้าง)
+if showRev and chochUp
+    label.new(bar_index, low, "⤴ กลับตัวขึ้น", yloc=yloc.belowbar, style=label.style_label_up, color=color.new(cUpS, 15), textcolor=#FFFFFF, size=size.small)
+if showRev and chochDn
+    label.new(bar_index, high, "⤵ กลับตัวลง", yloc=yloc.abovebar, style=label.style_label_down, color=color.new(cDnS, 15), textcolor=#FFFFFF, size=size.small)
+
+// เส้นที่ต้องเฝ้า : ราคาปิดผ่านเส้นนี้เมื่อไร = โครงสร้างกลับข้าง
+var line  revLn = na
+var label revLb = na
+if drawNow
+    line.delete(revLn)
+    label.delete(revLb)
+    if showRev and not na(revLvl)
+        rCol  = structDir == 1 ? cDnS : cUpS
+        revLn := line.new(math.max(0, bar_index - 20), revLvl, bar_index + 5, revLvl, color=color.new(rCol, 15), width=1, style=line.style_dashed)
+        revLb := label.new(bar_index + 5, revLvl, (structDir == 1 ? "หลุด = กลับตัวลง " : "ทะลุ = กลับตัวขึ้น ") + str.tostring(revLvl, format.mintick), style=label.style_label_left, color=color.new(rCol, 20), textcolor=#FFFFFF, size=size.tiny)
+
+plot(strategy.position_size > 0 ? longSL : strategy.position_size < 0 ? shortSL : na, "Stop / Trailing", color=color.new(cDnS, 0), style=plot.style_linebr, linewidth=2)
+plot(strategy.position_size > 0 and tpMode == MODE_FIX ? longTP : strategy.position_size < 0 and tpMode == MODE_FIX ? shortTP : na, "Take Profit", color=color.new(color.teal, 0), style=plot.style_linebr, linewidth=1)
+
+plot(longScore,  "คะแนน Long",  display=display.data_window)
+plot(shortScore, "คะแนน Short", display=display.data_window)
+plot(adxValue,   "ADX",         display=display.data_window)
+plot(trendState, "แนวโน้ม (1/0/-1)", display=display.data_window)
+
+// ============================================================================
+// VISUALS : แนวรับ - แนวต้าน  (วาดใหม่ทุกครั้งที่แท่งล่าสุดอัปเดต -> เรียลไทม์)
+// ============================================================================
+var array<line>  srLines = array.new_line()
+var array<label> srLabs  = array.new_label()
+
+if drawNow
+    if array.size(srLines) > 0
+        for i = 0 to array.size(srLines) - 1
+            line.delete(array.get(srLines, i))
+    array.clear(srLines)
+    if array.size(srLabs) > 0
+        for i = 0 to array.size(srLabs) - 1
+            label.delete(array.get(srLabs, i))
+    array.clear(srLabs)
+    if showSR and array.size(srLevels) > 0
+        for i = 0 to array.size(srLevels) - 1
+            lv = array.get(srLevels, i)
+            isRes = lv > close
+            col = isRes ? color.new(cDnS, 20) : color.new(cUpS, 20)
+            x1 = math.max(0, bar_index - srLen)
+            ln = line.new(x1, lv, bar_index + 5, lv, color=col, width=1, style=line.style_dashed)
+            array.push(srLines, ln)
+            txt = (isRes ? "แนวต้าน " : "แนวรับ ") + str.tostring(lv, format.mintick)
+            lb = label.new(bar_index + 5, lv, txt, style=label.style_label_left, color=color.new(color.black, 100), textcolor=col, size=size.small)
+            array.push(srLabs, lb)
+// ช่วงราคาที่คาด (ความผันผวน) + ความแม่นที่วัดได้จริงย้อนหลัง
+var line fcUp  = na
+var line fcDn  = na
+var label fcLab = na
+
+if drawNow
+    line.delete(fcUp)
+    line.delete(fcDn)
+    label.delete(fcLab)
+    if showFcast
+        x2 = bar_index + projBars
+        fcUp := line.new(bar_index, close, x2, rangeUp, color=color.new(cNeuS, 25), width=1, style=line.style_dashed)
+        fcDn := line.new(bar_index, close, x2, rangeDn, color=color.new(cNeuS, 25), width=1, style=line.style_dashed)
+        covTxt = na(coverage) ? "" : "\nย้อนหลังจริง " + str.tostring(coverage, "#") + "%"
+        ctxt = "ช่วงที่คาด " + str.tostring(targetCov) + "%" + covTxt + "\n" + str.tostring(rangeUp, format.mintick) + "\n" + str.tostring(rangeDn, format.mintick)
+        fcLab := label.new(x2, close, ctxt, style=label.style_label_left, color=color.new(cNeuS, 20), textcolor=#FFFFFF, size=size.small)
+
+// ป้ายแนวโน้มลอยข้างราคา (ปิดไว้เป็นค่าเริ่มต้น เพราะแถบด้านบนบอกอยู่แล้ว)
+var label trendLbl = na
+if drawNow
+    label.delete(trendLbl)
+    if showTrendPanel
+        ttxt = trendTxt + "  " + str.tostring(mathConf) + "%"
+        trendLbl := label.new(bar_index + projBars + 12, close, ttxt, style=label.style_label_left, color=color.new(trendCol, 10), textcolor=#FFFFFF, size=size.large)
+
+// ============================================================================
+// แถบแนวโน้มตัวใหญ่ (อ่านง่ายจากระยะไกล) - แทนที่รายละเอียดสถิติในตาราง
+// ============================================================================
+var table bannerTbl = table.new(posBan, 1, 4, border_width=0)
+
+if drawNow and showBanner
+    b1 = trendTxt + "  " + str.tostring(mathConf) + "%" + (ewPts > 0 ? "   |   " + ewTxt : "")
+    b2 = "R² " + str.tostring(rSquared, "#.00") + " · ER " + str.tostring(effRatio, "#.00") + " · ADX " + str.tostring(adxValue, "#.0") + " · Z " + str.tostring(zScore, "#.00") + (na(ewTarget) ? "" : " · เป้าคลื่น " + str.tostring(ewTarget, format.mintick))
+    table.cell(bannerTbl, 0, 0, b1, text_size=bSize1, bgcolor=color.new(trendCol, 15), text_color=#FFFFFF)
+    table.cell(bannerTbl, 0, 1, b2, text_size=bSize2, bgcolor=color.new(trendCol, 55), text_color=#FFFFFF)
+    // แยกบรรทัดตัวเลขออกจากบรรทัดสถานะ เพื่อลดความกว้างของแถบลงราวครึ่งหนึ่ง
+    b3 = nowIcon + " ถ้าเข้าตอนนี้: " + nowAct + (planSide == 1 ? "  (แผน LONG)" : "  (แผน SHORT)")
+    b4 = "▶ " + str.tostring(planEntry, format.mintick) + "   ✕ " + str.tostring(planStop, format.mintick) + "   ◆ " + str.tostring(planTp1, format.mintick) + "   ★ " + str.tostring(planTp2, format.mintick)
+    table.cell(bannerTbl, 0, 2, b3, text_size=bSize1, bgcolor=color.new(nowCol, 12), text_color=#FFFFFF)
+    table.cell(bannerTbl, 0, 3, b4, text_size=bSize2, bgcolor=color.new(nowCol, 45), text_color=#FFFFFF)
+
+// ============================================================================
+// วาดคลื่น ELLIOTT + โซนทอง FIBONACCI + VOLUME PROFILE บนกราฟ
+// ----------------------------------------------------------------------------
+// วาดใหม่เฉพาะตอนแท่งล่าสุดอัปเดต และเปลี่ยนก็ต่อเมื่อมีจุดกลับตัว "ใหม่ที่ยืนยันแล้ว"
+// จึงไม่กะพริบและไม่วิเคราะห์ถี่เกินจำเป็น
+// ============================================================================
+var array<line>  ewLines = array.new_line()
+var array<label> ewLabs  = array.new_label()
+var line  ewTgtLn = na
+var label ewTgtLb = na
+var line  ewInvLn = na
+var label ewInvLb = na
+var box   fibBoxD = na
+var line  fibLn38 = na
+var line  fibLn61 = na
+var line  pocLn   = na
+var line  vahLn   = na
+var line  valLn   = na
+var label pocLb   = na
+
+if drawNow
+    if array.size(ewLines) > 0
+        for i = 0 to array.size(ewLines) - 1
+            line.delete(array.get(ewLines, i))
+        array.clear(ewLines)
+    if array.size(ewLabs) > 0
+        for i = 0 to array.size(ewLabs) - 1
+            label.delete(array.get(ewLabs, i))
+        array.clear(ewLabs)
+    line.delete(ewTgtLn)
+    label.delete(ewTgtLb)
+    line.delete(ewInvLn)
+    label.delete(ewInvLb)
+    box.delete(fibBoxD)
+    line.delete(fibLn38)
+    line.delete(fibLn61)
+    line.delete(pocLn)
+    line.delete(vahLn)
+    line.delete(valLn)
+    label.delete(pocLb)
+
+    wcol = ewBias == 1 ? cUpS : ewBias == -1 ? cDnS : cWarnS
+
+    // ---- เส้นเชื่อมคลื่น + เลขคลื่น 0-1-2-3-4-5  (ปรับฐานใช้ 0-A-B-C) ----
+    if showEw and ewPts > 1
+        for k = ewPts - 1 to 1
+            ln = line.new(f_zi(zzB, k), f_zf(zzP, k), f_zi(zzB, k - 1), f_zf(zzP, k - 1), color=color.new(wcol, 15), width=2)
+            array.push(ewLines, ln)
+    if showEw and ewPts > 0
+        for k = ewPts - 1 to 0
+            isHi = f_zi(zzD, k) == 1
+            lb = label.new(f_zi(zzB, k), f_zf(zzP, k), f_ewLab(ewPts - 1 - k, ewCorr), style = isHi ? label.style_label_down : label.style_label_up, color=color.new(wcol, 10), textcolor=#FFFFFF, size=size.small)
+            array.push(ewLabs, lb)
+        if not na(ewTarget)
+            ewTgtLn := line.new(bar_index, close, bar_index + projBars, ewTarget, color=color.new(wcol, 10), width=2, style=line.style_dashed)
+            ewTgtLb := label.new(bar_index + projBars, ewTarget, (ewCorr ? "เป้าปรับฐาน " : "เป้าคลื่น ") + str.tostring(ewTarget, format.mintick), style=label.style_label_left, color=color.new(wcol, 12), textcolor=#FFFFFF, size=size.small)
+        // เส้นตัดสิน : หลุดเส้นนี้ = การนับคลื่นเปลี่ยนความหมาย
+        if not na(ewInval)
+            ewInvLn := line.new(math.max(0, bar_index - 30), ewInval, bar_index + projBars, ewInval, color=color.new(cWarnS, 35), width=1, style=line.style_dotted)
+            ewInvLb := label.new(bar_index + projBars, ewInval, "เส้นตัดสินคลื่น " + str.tostring(ewInval, format.mintick), style=label.style_label_left, color=color.new(cWarnS, 25), textcolor=#FFFFFF, size=size.tiny)
+
+    // ---- โซนทอง Fibonacci ของขาล่าสุด ----
+    if showFib and hasFib
+        xL = math.max(0, math.min(f_zi(zzB, 1), bar_index - 1))
+        fibBoxD := box.new(xL, gzTop, bar_index + 5, gzBot, border_color=color.new(cWarnS, 55), bgcolor=color.new(cWarnS, 85))
+        fibLn61 := line.new(xL, fib618, bar_index + 5, fib618, color=color.new(cWarnS, 25), width=1, style=line.style_dotted)
+        fibLn38 := line.new(xL, fib382, bar_index + 5, fib382, color=color.new(cNeuS, 40), width=1, style=line.style_dotted)
+
+    // ---- Volume Profile : POC และขอบ Value Area 70% ----
+    if vpOk
+        // ป้าย POC วางขวากว่าป้ายแนวรับ-แนวต้าน / เส้นกลับตัว (ซึ่งอยู่ที่ +5) จะได้ไม่ทับกัน
+        x1 = math.max(0, bar_index - vpLen)
+        x2 = bar_index + 22
+        pocLn := line.new(x1, pocPx, x2, pocPx, color=color.new(#F0B90B, 10), width=2)
+        vahLn := line.new(x1, vahPx, x2, vahPx, color=color.new(#F0B90B, 60), width=1, style=line.style_dotted)
+        valLn := line.new(x1, valPx, x2, valPx, color=color.new(#F0B90B, 60), width=1, style=line.style_dotted)
+        pocLb := label.new(x2, pocPx, "POC " + str.tostring(pocPx, format.mintick) + (vpNoVol ? "  (ไม่มี Volume · นับแท่งแทน)" : ""), style=label.style_label_left, color=color.new(#F0B90B, 20), textcolor=#1A1A1A, size=size.small)
+
+// ---- ป้ายไดเวอร์เจนซ์ : ขึ้นครั้งเดียวตอนตรวจพบใหม่ ----
+divNewBull = bullDiv and not bullDiv[1] and barstate.isconfirmed
+divNewBear = bearDiv and not bearDiv[1] and barstate.isconfirmed
+
+if divNewBull
+    label.new(f_zi(zzB, d0 == -1 ? 0 : 1), loNew, "Div+", style=label.style_label_up, color=color.new(cUpS, 20), textcolor=#FFFFFF, size=size.tiny)
+if divNewBear
+    label.new(f_zi(zzB, d0 == 1 ? 0 : 1), hiNew, "Div-", style=label.style_label_down, color=color.new(cDnS, 20), textcolor=#FFFFFF, size=size.tiny)
+
+// ============================================================================
+// วาดแผนเข้า - ออก บนกราฟ (เส้น เข้า / SL / TP)
+// ============================================================================
+var line  planEnLn   = na
+var line  planSlLn   = na
+var line  planT1Ln   = na
+var line  planT2Ln   = na
+var label planEnLb   = na
+var label planSlLb   = na
+var label planT1Lb   = na
+var label planT2Lb   = na
+
+if drawNow
+    line.delete(planEnLn)
+    line.delete(planSlLn)
+    line.delete(planT1Ln)
+    line.delete(planT2Ln)
+    label.delete(planEnLb)
+    label.delete(planSlLb)
+    label.delete(planT1Lb)
+    label.delete(planT2Lb)
+
+    if showPlan and not na(planEntry) and not na(planStop) and not na(planTp2)
+        sCol    = planSide == 1 ? cUpS : cDnS
+        sideTxt = planSide == 1 ? "LONG" : "SHORT"
+        // โหมด Trailing ล้วน strategy ไม่ได้ตั้ง limit ที่ TP -> แสดงเป็น "เป้า" ไม่ใช่ "ออก"
+        tpWord  = tpMode == MODE_TRAIL ? "เป้า " : "ออก "
+        xa      = bar_index
+        xb      = bar_index + planLen
+
+        planEnLn := line.new(xa, planEntry, xb, planEntry, color=color.new(sCol, 0),  width=2)
+        planSlLn := line.new(xa, planStop,  xb, planStop,  color=color.new(cDnS, 10), width=2, style=line.style_dashed)
+        planT1Ln := line.new(xa, planTp1,   xb, planTp1,   color=color.new(cUpS, 30), width=1, style=line.style_dotted)
+        planT2Ln := line.new(xa, planTp2,   xb, planTp2,   color=color.new(cUpS, 0),  width=2)
+
+        planEnLb := label.new(xb, planEntry, "▶ เข้า " + sideTxt + " " + str.tostring(planEntry, format.mintick) + "   " + planTxt + (ewBias != 0 and ewBias != planSide ? "  ⚠ สวนโครงสร้างคลื่น" : ""), style=label.style_label_left, color=color.new(sCol, 8), textcolor=#FFFFFF, size=size.small)
+        planSlLb := label.new(xb, planStop,  "✕ ออก SL " + str.tostring(planStop, format.mintick) + "   " + str.tostring(stopPct, "#.#") + "%" + (slOnWave ? "  · ชิดเส้นตัดสินคลื่น" : ""), style=label.style_label_left, color=color.new(cDnS, 8), textcolor=#FFFFFF, size=size.small)
+        planT1Lb := label.new(xb, planTp1,   "◆ " + tpWord + "TP1 " + str.tostring(planTp1, format.mintick) + "   " + str.tostring(tp1R, "#.#") + "R", style=label.style_label_left, color=color.new(cUpS, 35), textcolor=#FFFFFF, size=size.small)
+        planT2Lb := label.new(xb, planTp2,   "★ " + tpWord + "TP2 " + str.tostring(planTp2, format.mintick) + "   +" + str.tostring(tp2Pct, "#.#") + "%  R:R 1:" + str.tostring(planRR, "#.#") + (waveFar ? " (เป้าคลื่น)" : ""), style=label.style_label_left, color=color.new(cUpS, 8), textcolor=#FFFFFF, size=size.small)
+
+// ---- ลากเส้นจุดเข้า → จุดออก ของไม้ที่ปิดไปแล้ว + ป้ายผลลัพธ์ ----
+var int drawnTrades = 0
+if barstate.isconfirmed and showTrades and strategy.closedtrades > drawnTrades
+    for n = drawnTrades to strategy.closedtrades - 1
+        ebi  = strategy.closedtrades.entry_bar_index(n)
+        epx  = strategy.closedtrades.entry_price(n)
+        xbi  = strategy.closedtrades.exit_bar_index(n)
+        xpx  = strategy.closedtrades.exit_price(n)
+        dirT = strategy.closedtrades.size(n) > 0 ? 1 : -1
+        pct  = epx > 0 ? (xpx - epx) / epx * 100 * dirT : 0.0
+        tcol = pct >= 0 ? cUpS : cDnS
+        line.new(ebi, epx, xbi, xpx, color=color.new(tcol, 30), width=1, style=line.style_dotted)
+        label.new(xbi, xpx, "ออก " + (pct >= 0 ? "+" : "") + str.tostring(pct, "#.#") + "%", style = dirT == 1 ? label.style_label_down : label.style_label_up, color=color.new(tcol, 25), textcolor=#FFFFFF, size=size.tiny)
+    drawnTrades := strategy.closedtrades
+
+// ============================================================================
+// ตารางคะแนน ซื้อ / ขาย   (มุมล่างขวา · รองรับทั้งธีมมืดและธีมสว่าง)
+// ============================================================================
+f_mark(b) => b ? "✔" : "✘"
+f_col(b)  => b ? cOkBg : cNoBg
+f_px(v)   => na(v) ? "-" : str.tostring(v, format.mintick)
+
+var table sigTbl = table.new(posSig, 3, 30, border_width=1, frame_width=1, frame_color=cFrame, border_color=cGridC, bgcolor=cRowBg)
+
+if drawNow
+    table.clear(sigTbl, 0, 0, 2, 29)
+    table.set_frame_color(sigTbl, cFrame)
+    table.set_border_color(sigTbl, cGridC)
+    table.set_bgcolor(sigTbl, cRowBg)
+    if showSignalTable
+        bull = longSignal
+        bear = shortSignal
+        watching  = longScore >= watchScore or shortScore >= watchScore
+        statusTxt = bull ? "🟢 เข้าซื้อได้" : bear ? "🔴 เข้าขายได้" : longScore >= watchScore ? "🟡 เฝ้าดูฝั่งซื้อ" : shortScore >= watchScore ? "🟡 เฝ้าดูฝั่งขาย" : "⚪ ยังไม่ควรเข้า"
+        statusCol = bull ? cOkBg : bear ? cNoBg : watching ? cWarnBg : cNeuBg
+        ewCol     = ewBias == 1 ? cOkBg : ewBias == -1 ? cNoBg : cNeuBg
+        divTxt    = bullDiv ? "🟢 บวก (คาดกลับขึ้น)" : bearDiv ? "🔴 ลบ (คาดกลับลง)" : "ไม่มี"
+        divCol    = bullDiv ? cOkBg : bearDiv ? cNoBg : cRowBg
+
+        int r = 0
+        table.cell(sigTbl, 0, r, "คะแนน (ผ่านที่ " + str.tostring(minScore) + ")", text_size=tSize, bgcolor=cHeadBg, text_color=cHeadTx)
+        table.cell(sigTbl, 1, r, "ซื้อ " + str.tostring(longScore), text_size=tSize, bgcolor=longScore >= minScore ? cOkBg : cNeuBg, text_color=cHeadTx)
+        table.cell(sigTbl, 2, r, "ขาย " + str.tostring(shortScore), text_size=tSize, bgcolor=shortScore >= minScore ? cNoBg : cNeuBg, text_color=cHeadTx)
+        r += 1
+
+        table.cell(sigTbl, 0, r, "สถานะตอนนี้", text_size=tSize, bgcolor=cRowAlt, text_color=cTx)
+        table.cell(sigTbl, 1, r, statusTxt, text_size=tSize, bgcolor=statusCol, text_color=cHeadTx)
+        table.cell(sigTbl, 2, r, "", bgcolor=statusCol)
+        r += 1
+
+        stTxt = structDir == 1 ? "🔼 ขาขึ้น" : structDir == -1 ? "🔽 ขาลง" : "ยังไม่ชัด"
+        stCol = structDir == 1 ? cOkBg : structDir == -1 ? cNoBg : cNeuBg
+        table.cell(sigTbl, 0, r, "โครงสร้างราคา", text_size=tSize, bgcolor=cRowAlt, text_color=cTx)
+        table.cell(sigTbl, 1, r, stTxt, text_size=tSize, bgcolor=stCol, text_color=cHeadTx)
+        table.cell(sigTbl, 2, r, na(revLvl) ? "-" : (structDir == 1 ? "กลับตัวถ้าหลุด " : "กลับตัวถ้าทะลุ ") + f_px(revLvl), text_size=tSize, bgcolor=cRowBg, text_color=cTx)
+        r += 1
+
+        table.cell(sigTbl, 0, r, "โครงสร้างคลื่น Elliott", text_size=tSize, bgcolor=cRowAlt, text_color=cTx)
+        table.cell(sigTbl, 1, r, ewTxt, text_size=tSize, bgcolor=ewCol, text_color=cHeadTx)
+        table.cell(sigTbl, 2, r, ewPts > 0 ? "ชัด " + str.tostring(ewConf) + "%" : "-", text_size=tSize, bgcolor=ewCol, text_color=cHeadTx)
+        r += 1
+
+        table.cell(sigTbl, 0, r, "ไดเวอร์เจนซ์ RSI", text_size=tSize, bgcolor=cRowAlt, text_color=cTx)
+        table.cell(sigTbl, 1, r, divTxt, text_size=tSize, bgcolor=divCol, text_color=cTx)
+        table.cell(sigTbl, 2, r, "หลักฐานร่วม " + str.tostring(math.max(confLN, confSN)) + "/3", text_size=tSize, bgcolor=cRowBg, text_color=cTxDim)
+        r += 1
+
+        table.cell(sigTbl, 0, r, "โซนทอง Fib 0.5-0.618", text_size=tSize, bgcolor=cRowAlt, text_color=cTx)
+        table.cell(sigTbl, 1, r, hasFib ? f_px(gzBot) + " - " + f_px(gzTop) : "-", text_size=tSize, bgcolor=cRowBg, text_color=cTx)
+        table.cell(sigTbl, 2, r, not hasFib ? "-" : inGolden ? "ราคาอยู่ในโซน" : "นอกโซน", text_size=tSize, bgcolor=inGolden ? cWarnBg : cRowBg, text_color=inGolden ? cHeadTx : cTxDim)
+        r += 1
+
+        table.cell(sigTbl, 0, r, "POC / โซนซื้อขายหนาแน่น", text_size=tSize, bgcolor=cRowAlt, text_color=cTx)
+        table.cell(sigTbl, 1, r, f_px(pocPx), text_size=tSize, bgcolor=cRowBg, text_color=cTx)
+        table.cell(sigTbl, 2, r, vpOk ? f_px(valPx) + " - " + f_px(vahPx) : "-", text_size=tSize, bgcolor=cRowBg, text_color=cTxDim)
+        r += 1
+
+        if not compactTable
+            table.cell(sigTbl, 0, r, "ปัจจัย (" + htfRes + " / " + timeframe.period + ")", text_size=tSize, bgcolor=cHeadBg, text_color=cHeadTx)
+            table.cell(sigTbl, 1, r, "ซื้อ", text_size=tSize, bgcolor=cHeadBg, text_color=cHeadTx)
+            table.cell(sigTbl, 2, r, "ขาย", text_size=tSize, bgcolor=cHeadBg, text_color=cHeadTx)
+            r += 1
+
+            table.cell(sigTbl, 0, r, "เทรนด์ " + htfRes + " (22)", text_size=tSize, bgcolor=cRowBg, text_color=cTx)
+            table.cell(sigTbl, 1, r, f_mark(fLHtf), text_size=tSize, bgcolor=f_col(fLHtf), text_color=cHeadTx)
+            table.cell(sigTbl, 2, r, f_mark(fSHtf), text_size=tSize, bgcolor=f_col(fSHtf), text_color=cHeadTx)
+            r += 1
+
+            table.cell(sigTbl, 0, r, "คณิตศาสตร์ " + str.tostring(mathConf) + "% (18)", text_size=tSize, bgcolor=cRowBg, text_color=cTx)
+            table.cell(sigTbl, 1, r, f_mark(fLMath), text_size=tSize, bgcolor=f_col(fLMath), text_color=cHeadTx)
+            table.cell(sigTbl, 2, r, f_mark(fSMath), text_size=tSize, bgcolor=f_col(fSMath), text_color=cHeadTx)
+            r += 1
+
+            table.cell(sigTbl, 0, r, "คลื่น Elliott (10)", text_size=tSize, bgcolor=cRowBg, text_color=cTx)
+            table.cell(sigTbl, 1, r, str.tostring(fLWaveN), text_size=tSize, bgcolor=fLWave ? cOkBg : ewBias == 0 ? cNeuBg : cNoBg, text_color=cHeadTx)
+            table.cell(sigTbl, 2, r, str.tostring(fSWaveN), text_size=tSize, bgcolor=fSWave ? cOkBg : ewBias == 0 ? cNeuBg : cNoBg, text_color=cHeadTx)
+            r += 1
+
+            table.cell(sigTbl, 0, r, "ADX " + str.tostring(adxValue, "#.0") + " (9)", text_size=tSize, bgcolor=cRowBg, text_color=cTx)
+            table.cell(sigTbl, 1, r, f_mark(fLAdx), text_size=tSize, bgcolor=f_col(fLAdx), text_color=cHeadTx)
+            table.cell(sigTbl, 2, r, f_mark(fSAdx), text_size=tSize, bgcolor=f_col(fSAdx), text_color=cHeadTx)
+            r += 1
+
+            table.cell(sigTbl, 0, r, "MACD (8)", text_size=tSize, bgcolor=cRowBg, text_color=cTx)
+            table.cell(sigTbl, 1, r, f_mark(fLMacd), text_size=tSize, bgcolor=f_col(fLMacd), text_color=cHeadTx)
+            table.cell(sigTbl, 2, r, f_mark(fSMacd), text_size=tSize, bgcolor=f_col(fSMacd), text_color=cHeadTx)
+            r += 1
+
+            table.cell(sigTbl, 0, r, "RSI " + str.tostring(rsiValue, "#.0") + " (8)", text_size=tSize, bgcolor=cRowBg, text_color=cTx)
+            table.cell(sigTbl, 1, r, f_mark(fLRsi), text_size=tSize, bgcolor=f_col(fLRsi), text_color=cHeadTx)
+            table.cell(sigTbl, 2, r, f_mark(fSRsi), text_size=tSize, bgcolor=f_col(fSRsi), text_color=cHeadTx)
+            r += 1
+
+            table.cell(sigTbl, 0, r, "Volume (8)", text_size=tSize, bgcolor=cRowBg, text_color=cTx)
+            table.cell(sigTbl, 1, r, f_mark(fLVol), text_size=tSize, bgcolor=f_col(fLVol), text_color=cHeadTx)
+            table.cell(sigTbl, 2, r, f_mark(fSVol), text_size=tSize, bgcolor=f_col(fSVol), text_color=cHeadTx)
+            r += 1
+
+            table.cell(sigTbl, 0, r, "ระยะถึงแนว (8)", text_size=tSize, bgcolor=cRowBg, text_color=cTx)
+            table.cell(sigTbl, 1, r, f_mark(fLSr), text_size=tSize, bgcolor=f_col(fLSr), text_color=cHeadTx)
+            table.cell(sigTbl, 2, r, f_mark(fSSr), text_size=tSize, bgcolor=f_col(fSSr), text_color=cHeadTx)
+            r += 1
+
+            table.cell(sigTbl, 0, r, "หลักฐานร่วม (5)", text_size=tSize, bgcolor=cRowBg, text_color=cTx)
+            table.cell(sigTbl, 1, r, str.tostring(fLConfN) + " (" + str.tostring(confLN) + "/3)", text_size=tSize, bgcolor=fLConf ? cOkBg : cNeuBg, text_color=cHeadTx)
+            table.cell(sigTbl, 2, r, str.tostring(fSConfN) + " (" + str.tostring(confSN) + "/3)", text_size=tSize, bgcolor=fSConf ? cNoBg : cNeuBg, text_color=cHeadTx)
+            r += 1
+
+            table.cell(sigTbl, 0, r, "Z-score " + str.tostring(zScore, "#.00") + " (4)", text_size=tSize, bgcolor=cRowBg, text_color=cTx)
+            table.cell(sigTbl, 1, r, f_mark(fLExt), text_size=tSize, bgcolor=f_col(fLExt), text_color=cHeadTx)
+            table.cell(sigTbl, 2, r, f_mark(fSExt), text_size=tSize, bgcolor=f_col(fSExt), text_color=cHeadTx)
+            r += 1
+
+        table.cell(sigTbl, 0, r, "แนวต้าน / แนวรับ", text_size=tSize, bgcolor=cRowAlt, text_color=cTx)
+        table.cell(sigTbl, 1, r, f_px(nearRes), text_size=tSize, bgcolor=color.new(cDnS, 85), text_color=cTx)
+        table.cell(sigTbl, 2, r, f_px(nearSup), text_size=tSize, bgcolor=color.new(cUpS, 85), text_color=cTx)
+        r += 1
+
+        table.cell(sigTbl, 0, r, "ระยะ (ATR)", text_size=tSize, bgcolor=cRowBg, text_color=cTx)
+        table.cell(sigTbl, 1, r, na(nearRes) ? "-" : "+" + str.tostring(resRoom, "#.0"), text_size=tSize, bgcolor=cRowBg, text_color=cTx)
+        table.cell(sigTbl, 2, r, na(nearSup) ? "-" : "-" + str.tostring(supRoom, "#.0"), text_size=tSize, bgcolor=cRowBg, text_color=cTx)
+        r += 1
+
+        planCol = planSide == 1 ? cOkBg : cNoBg
+        table.cell(sigTbl, 0, r, "▶ จุดเข้า " + (planSide == 1 ? "LONG" : "SHORT"), text_size=tSize, bgcolor=planCol, text_color=cHeadTx)
+        table.cell(sigTbl, 1, r, f_px(planEntry), text_size=tSize, bgcolor=planCol, text_color=cHeadTx)
+        table.cell(sigTbl, 2, r, planTxt, text_size=tSize, bgcolor=planCol, text_color=cHeadTx)
+        r += 1
+
+        table.cell(sigTbl, 0, r, "✕ จุดออก (SL)", text_size=tSize, bgcolor=cRowAlt, text_color=cTx)
+        table.cell(sigTbl, 1, r, f_px(planStop), text_size=tSize, bgcolor=color.new(cDnS, 85), text_color=cTx)
+        table.cell(sigTbl, 2, r, na(stopPct) ? "-" : str.tostring(stopPct, "#.#") + "%" + (slOnWave ? " · ชิดเส้นตัดสินคลื่น" : ""), text_size=tSize, bgcolor=slOnWave ? cWarnBg : cRowBg, text_color=slOnWave ? cHeadTx : cTx)
+        r += 1
+
+        table.cell(sigTbl, 0, r, "◆ จุดออก TP1 / ★ TP2", text_size=tSize, bgcolor=cRowAlt, text_color=cTx)
+        table.cell(sigTbl, 1, r, f_px(planTp1), text_size=tSize, bgcolor=color.new(cUpS, 85), text_color=cTx)
+        table.cell(sigTbl, 2, r, f_px(planTp2) + (waveFar ? " (คลื่น)" : ""), text_size=tSize, bgcolor=color.new(cUpS, 78), text_color=cTx)
+        r += 1
+
+        table.cell(sigTbl, 0, r, "R:R / สถานะไม้", text_size=tSize, bgcolor=cRowBg, text_color=cTx)
+        table.cell(sigTbl, 1, r, na(planRR) ? "-" : "1 : " + str.tostring(planRR, "#.#"), text_size=tSize, bgcolor=na(planRR) ? cRowBg : planRR >= 2.5 ? cOkBg : planRR >= 1.5 ? cWarnBg : cNoBg, text_color=na(planRR) ? cTx : cHeadTx)
+        table.cell(sigTbl, 2, r, planStatTxt, text_size=tSize, bgcolor=cRowBg, text_color=cTxDim)
+        r += 1
+
+        table.cell(sigTbl, 0, r, "ช่วงที่คาด +" + str.tostring(projBars) + " แท่ง (" + str.tostring(targetCov) + "%" + (na(coverage) ? "" : " · จริง " + str.tostring(coverage, "#") + "%") + ")", text_size=tSize, bgcolor=cRowAlt, text_color=cTx)
+        table.cell(sigTbl, 1, r, f_px(rangeUp), text_size=tSize, bgcolor=cRowBg, text_color=cTx)
+        table.cell(sigTbl, 2, r, f_px(rangeDn), text_size=tSize, bgcolor=cRowBg, text_color=cTx)
+        r += 1
+
+
+// ============================================================================
+// ตารางจุดเข้า - จุดออก  (กะทัดรัด : เอาไทม์เฟรมไปเป็นคอลัมน์ เหลือเหรียญละ 1 แถว)
+// ----------------------------------------------------------------------------
+// แถวกราฟนี้   : ตัวเลขมาจากเครื่องยนต์เต็ม (คะแนน 100 + คลื่น + confluence)
+// แถวเหรียญที่2 : เลือกไทม์เฟรมที่สัญญาณชัดที่สุดให้อัตโนมัติ แล้วคิด เข้า/SL/TP จาก TF นั้น
+// ============================================================================
+f_fmt(v) => na(v) ? "-" : v >= 1000 ? str.tostring(v, "#.0") : v >= 10 ? str.tostring(v, "#.00") : v >= 1 ? str.tostring(v, "#.000") : str.tostring(v, "#.0000")
+f_tfTxt(t) => t == "D" ? "1D" : t == "W" ? "1W" : t == "240" ? "4H" : t == "120" ? "2H" : t == "60" ? "1H" : t == "30" ? "30m" : t == "15" ? "15m" : t
+
+f_chip(tb, cl, rw, d, sc) =>
+    ready = sc >= minScore
+    watch = sc >= watchScore
+    ic    = not watch ? "⚪ " : d == 1 ? (ready ? "🟢 " : "↗ ") : (ready ? "🔴 " : "↘ ")
+    bg    = not watch ? cNeuBg : d == 1 ? cOkBg : cNoBg
+    table.cell(tb, cl, rw, ic + str.tostring(sc), text_size=tSize, bgcolor=bg, text_color=cHeadTx)
+
+// เหรียญที่สอง : ใช้ไทม์เฟรมที่คะแนนสูงสุดเป็นตัววางแผน
+xBestSc  = math.max(xaSc, math.max(xbSc, xcSc))
+xBestDir = xBestSc == xaSc ? xaDir : xBestSc == xbSc ? xbDir : xcDir
+xBestAtr = xBestSc == xaSc ? xaAtr : xBestSc == xbSc ? xbAtr : xcAtr
+xBestPx  = xBestSc == xaSc ? xaPx  : xBestSc == xbSc ? xbPx  : xcPx
+xBestTf  = xBestSc == xaSc ? tfA   : xBestSc == xbSc ? tfB   : tfC
+xRisk    = xBestAtr * atrMultSL
+xStop    = xBestDir == 1 ? xBestPx - xRisk : xBestPx + xRisk
+xTp1     = xBestDir == 1 ? xBestPx + xRisk * tp1R : xBestPx - xRisk * tp1R
+xTp2     = xBestDir == 1 ? xBestPx + xRisk * riskReward : xBestPx - xRisk * riskReward
+
+var table mtTbl = table.new(posMulti, 7, 4, border_width=1, frame_width=1, frame_color=cFrame, border_color=cGridC, bgcolor=cRowBg)
+
+if drawNow
+    table.clear(mtTbl, 0, 0, 6, 3)
+    if showMultiTbl
+        table.set_frame_color(mtTbl, cFrame)
+        table.set_border_color(mtTbl, cGridC)
+        table.set_bgcolor(mtTbl, cRowBg)
+
+        s1Txt = syminfo.ticker
+        string sXTxt = sym2
+        if str.contains(sym2, ":")
+            sXTxt := str.substring(sym2, str.pos(sym2, ":") + 1)
+
+        table.cell(mtTbl, 0, 0, "ถ้าเข้าตอนนี้", text_size=tSize, bgcolor=cHeadBg, text_color=cHeadTx)
+        table.cell(mtTbl, 1, 0, f_tfTxt(tfA), text_size=tSize, bgcolor=cHeadBg, text_color=cHeadTx)
+        table.cell(mtTbl, 2, 0, f_tfTxt(tfB), text_size=tSize, bgcolor=cHeadBg, text_color=cHeadTx)
+        table.cell(mtTbl, 3, 0, f_tfTxt(tfC), text_size=tSize, bgcolor=cHeadBg, text_color=cHeadTx)
+        table.cell(mtTbl, 4, 0, "▶ เข้า", text_size=tSize, bgcolor=cHeadBg, text_color=cHeadTx)
+        table.cell(mtTbl, 5, 0, "✕ SL",  text_size=tSize, bgcolor=cHeadBg, text_color=cHeadTx)
+        table.cell(mtTbl, 6, 0, "◆ TP1 / ★ TP2", text_size=tSize, bgcolor=cHeadBg, text_color=cHeadTx)
+
+        // ---- แถวกราฟปัจจุบัน : ใช้แผนจากเครื่องยนต์เต็ม ----
+        table.cell(mtTbl, 0, 1, nowIcon + " " + s1Txt + " " + f_tfTxt(timeframe.period), text_size=tSize, bgcolor=color.new(nowCol, 55), text_color=cTx)
+        f_chip(mtTbl, 1, 1, aDir, aSc)
+        f_chip(mtTbl, 2, 1, bDir, bSc)
+        f_chip(mtTbl, 3, 1, cDir, cSc)
+        table.cell(mtTbl, 4, 1, f_fmt(planEntry), text_size=tSize, bgcolor=color.new(nowCol, 70), text_color=cTx)
+        table.cell(mtTbl, 5, 1, f_fmt(planStop),  text_size=tSize, bgcolor=color.new(cDnS, 82), text_color=cTx)
+        table.cell(mtTbl, 6, 1, f_fmt(planTp1) + " / " + f_fmt(planTp2), text_size=tSize, bgcolor=color.new(cUpS, 80), text_color=cTx)
+
+        // ---- แถวเหรียญที่สอง ----
+        if useSym2
+            xBg = xBestSc < watchScore ? cNeuBg : xBestDir == 1 ? cOkBg : cNoBg
+            table.cell(mtTbl, 0, 2, sXTxt + " · " + f_tfTxt(xBestTf), text_size=tSize, bgcolor=color.new(xBg, 55), text_color=cTx)
+            f_chip(mtTbl, 1, 2, xaDir, xaSc)
+            f_chip(mtTbl, 2, 2, xbDir, xbSc)
+            f_chip(mtTbl, 3, 2, xcDir, xcSc)
+            xOk = xBestSc >= watchScore
+            table.cell(mtTbl, 4, 2, xOk ? f_fmt(xBestPx) : "รอ", text_size=tSize, bgcolor=cRowBg, text_color=cTx)
+            table.cell(mtTbl, 5, 2, xOk ? f_fmt(xStop) : "-",   text_size=tSize, bgcolor=color.new(cDnS, 82), text_color=cTx)
+            table.cell(mtTbl, 6, 2, xOk ? f_fmt(xTp1) + " / " + f_fmt(xTp2) : "-", text_size=tSize, bgcolor=color.new(cUpS, 80), text_color=cTx)
+
+// ============================================================================
+// ALERTS
+// ============================================================================
+// สคริปต์นี้เป็น strategy จึงใช้ alertcondition() ไม่ได้
+// ตั้ง Alert: ไอคอนนาฬิกาปลุก -> Condition = strategy นี้
+//            -> Message ใส่  {{strategy.order.alert_message}}
