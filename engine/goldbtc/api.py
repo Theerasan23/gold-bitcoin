@@ -128,7 +128,7 @@ def _run_summary(pp, d) -> dict:
         "created_ms": cfg.get("created_ms"), "equity": eq, "return_pct": (eq / cfg["capital"] - 1) * 100,
         "trades": len(trades), "wins": sum(1 for t in trades if t["pnl"] > 0),
         "total_r": float(sum(t["r"] for t in trades)),
-        "open_positions": len((st.get("engine") or {}).get("positions", {})),
+        "open_positions": len(pp.open_positions(st)),
         "heartbeat_ms": st.get("heartbeat_ms"),
     }
 
@@ -141,7 +141,7 @@ def paper_status(run: str | None = None):
     eng = st.get("engine") or {}
     prices = st.get("prices", {})
     positions = []
-    for p in eng.get("positions", {}).values():
+    for p in pp.open_positions(st):
         px = prices.get(p["symbol"])
         positions.append({**p, "price": px,
                           "pnl": (px - p["entry_price"]) * p["qty"] * p["side"] if px else None,
@@ -154,7 +154,8 @@ def paper_status(run: str | None = None):
         "equity": st.get("equity", cfg.capital), "cash": eng.get("cash", cfg.capital),
         "heartbeat_ms": st.get("heartbeat_ms"), "started_bar": st.get("started_bar"),
         "last_bar": st.get("last_bar", {}), "prices": prices, "positions": positions,
-        "pending": eng.get("pending", {}),
+        "watch": {s: {"bar": a["bar"], "trigger": a["trig_l"], "risk": a["risk"]}
+                  for s, a in eng.get("arm", {}).items() if not a.get("used") and a.get("trig_l") is not None},
         "closed": {"trades": len(trades), "wins": len(wins), "total_r": float(sum(t["r"] for t in trades)),
                    "pnl": float(sum(t["pnl"] for t in trades))},
     })

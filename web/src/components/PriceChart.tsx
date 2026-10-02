@@ -56,7 +56,9 @@ export default function PriceChart({ candles, live, strategy, demo, tfSec = 14_4
   const [showProfile, setShowProfile] = useState(true);
   const [showSideways, setShowSideways] = useState(true);
   const lines = useRef<IPriceLine[]>([]);
-  const demoPos = demo?.positions.find((p) => p.symbol === demo.symbol) ?? null;
+  // บัญชีเดโมถือได้หลายไม้ต่อเหรียญ · SL ที่ใกล้ราคาที่สุด = ไม้แรกที่จะโดนปิด
+  const demoPos = useMemo(() => demo?.positions.filter((p) => p.symbol === demo.symbol) ?? [], [demo]);
+  const demoStop = demoPos.length ? Math.max(...demoPos.map((p) => p.stop)) : null;
   const isDemo = demo != null;
 
   // ค่าทุกแท่ง (ไว้แสดงตอนเลื่อนเมาส์) : เวลา -> ระดับ SL / breakout / ทิศ
@@ -188,15 +190,17 @@ export default function PriceChart({ candles, live, strategy, demo, tfSec = 14_4
         mk.push({ time: ts(toBar(tr.exit_time, tfSec)), position: "aboveBar", shape: "arrowDown",
           color: tr.r >= 0 ? colors.good : colors.critical, text: `ออก ${fmtPrice(tr.exit_price)} · ${fmtR(tr.r)}` });
       }
-      if (demoPos) {
-        mk.push({ time: ts(toBar(demoPos.entry_time, tfSec)), position: "belowBar", shape: "arrowUp", color: colors.series1,
-          text: `เข้า ${fmtPrice(demoPos.entry_price)}` });
+      demoPos.forEach((p, k) => {
+        mk.push({ time: ts(toBar(p.entry_time, tfSec)), position: "belowBar", shape: "arrowUp", color: colors.series1,
+          text: `เข้า ${fmtPrice(p.entry_price)}` });
         lines.current.push(se.candle.createPriceLine({
-          price: demoPos.entry_price, color: colors.series1, lineWidth: 1, lineStyle: LineStyle.Dashed,
-          axisLabelVisible: true, title: "เข้า (เดโม)",
+          price: p.entry_price, color: colors.series1, lineWidth: 1, lineStyle: LineStyle.Dashed,
+          axisLabelVisible: true, title: demoPos.length > 1 ? `เข้า #${k + 1}` : "เข้า (เดโม)",
         }));
+      });
+      for (const stop of new Set(demoPos.map((p) => p.stop))) {
         lines.current.push(se.candle.createPriceLine({
-          price: demoPos.stop, color: colors.critical, lineWidth: 2, lineStyle: LineStyle.Solid,
+          price: stop, color: colors.critical, lineWidth: 2, lineStyle: LineStyle.Solid,
           axisLabelVisible: true, title: "SL (เดโม)",
         }));
       }
@@ -232,7 +236,7 @@ export default function PriceChart({ candles, live, strategy, demo, tfSec = 14_4
   const last = candles.length ? candles[candles.length - 1] : null;
   const shown: Readout | null = hover ?? (last && strategy ? {
     time: (live ?? last).time, o: (live ?? last).open, h: (live ?? last).high, l: (live ?? last).low, c: (live ?? last).close,
-    stop: demo ? demoPos?.stop ?? null : strategy.status.stop, brk: strategy.status.breakout_level,
+    stop: demo ? demoStop : strategy.status.stop, brk: strategy.status.breakout_level,
     regime: strategy.status.regime === "up" ? 1 : strategy.status.regime === "down" ? -1 : 0,
   } : null);
 
@@ -269,7 +273,7 @@ export default function PriceChart({ candles, live, strategy, demo, tfSec = 14_4
       <div ref={box} className="h-[460px] w-full" />
       <div className="mt-2 flex flex-wrap gap-x-4 gap-y-1 text-xs text-ink-2">
         <Key color="var(--candle-up)" kind="box">พื้นหลังเขียว = TF ใหญ่ขาขึ้น (ระบบเข้าได้)</Key>
-        <Key color="var(--muted)" kind="line">breakout = High สูงสุด 20 แท่ง (ปิดเหนือเส้น = สัญญาณเข้า)</Key>
+        <Key color="var(--muted)" kind="line">breakout = High สูงสุด 20 แท่ง (ราคาแตะเส้น = เข้าทันที · ถือแล้วเข้าเพิ่มเมื่อทำ High ใหม่เหนือไม้ล่าสุด)</Key>
         {demo ? (
           <>
             <Key color="var(--series-1)" kind="arrow">▲ เข้า · ▼ ออก ของบัญชีเดโม (ราคาที่ได้จริง)</Key>

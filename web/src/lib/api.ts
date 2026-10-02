@@ -30,9 +30,12 @@ export type StrategyStatus = {
   close: number;
   regime: "up" | "down" | "neutral";
   in_position: boolean;
-  entry_price: number | null;
-  stop: number | null;
-  breakout_level: number;
+  units: number;                 // จำนวนไม้ที่ถือ (เข้าเพิ่มได้หลายไม้)
+  entry_price: number | null;    // ไม้ล่าสุด
+  avg_entry: number | null;
+  stop: number | null;           // SL ที่ใกล้ราคาที่สุด
+  positions: { entry_time: number; entry_price: number }[];
+  breakout_level: number;        // ราคาที่จะเข้าไม้ถัดไปถ้าแตะ (เหนือไม้ล่าสุดด้วย)
   signal_on_last_bar: boolean;
   risk_per_unit: number;
   atr: number;
@@ -94,7 +97,7 @@ export type PaperStatus = {
   config: { capital: number; risk_pct: number; symbols: string[]; interval: string; created_ms: number };
   equity: number; cash: number; heartbeat_ms: number | null; started_bar: number | null;
   last_bar: Record<string, number>; prices: Record<string, number>; positions: PaperPosition[];
-  pending: Record<string, { action: string }>;
+  watch: Record<string, { bar: number; trigger: number; risk: number }>;   // จุดแตะของแท่งที่กำลังวิ่ง
   closed: { trades: number; wins: number; total_r: number; pnl: number };
 };
 export type PaperTrade = {

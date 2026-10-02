@@ -1,17 +1,5 @@
 import numpy as np
 
-from goldbtc.live import _stop_path
-
-
-def test_stop_path_ratchets_up_only():
-    h = np.array([100, 104, 103, 110, 108, 107], float)
-    atr = np.full(h.size, 2.0)
-    # trail 3 ATR = 6 ต่ำกว่าจุดสูงสุดหลังเข้า, SL เริ่มต้น 96
-    p = _stop_path(h, atr, 0, 5, 96.0, 3.0, 1)
-    assert list(p) == [96, 98, 98, 104, 104, 104]
-    assert (np.diff(p) >= 0).all()
-
-
 def test_sideways_boxes_from_low_adx_runs():
     from goldbtc.live import sideways_boxes
     adx = np.array([30] * 5 + [15] * 14 + [30] * 3 + [10] * 5 + [12] * 13, float)

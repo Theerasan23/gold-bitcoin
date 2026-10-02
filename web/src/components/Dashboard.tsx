@@ -111,14 +111,15 @@ export default function Dashboard() {
           tone={st?.regime === "up" ? "good" : st?.regime === "down" ? "bad" : undefined}
         />
         <Stat
-          label="สถานะไม้"
-          value={st ? (st.in_position ? "ถือ Long" : "ไม่มีไม้") : "–"}
+          label="สถานะไม้ (ตามสัญญาณ ไม่คิดเพดานเงิน)"
+          value={st ? (st.in_position ? `Long ${st.units} ไม้` : "ไม่มีไม้") : "–"}
           sub={st ? (st.in_position
-            ? `เข้า ${fmtPrice(st.entry_price)} · กำไร ${fmtPct(price && st.entry_price ? ((price - st.entry_price) / st.entry_price) * 100 : null, 2, true)}`
-            : st.regime === "up" ? `รอปิดเหนือ ${fmtPrice(st.breakout_level)}` : "รอเทรนด์ขาขึ้น") : undefined}
+            ? `เข้าเฉลี่ย ${fmtPrice(st.avg_entry)} · กำไร ${fmtPct(price && st.avg_entry ? ((price - st.avg_entry) / st.avg_entry) * 100 : null, 2, true)}`
+              + (st.regime === "up" ? ` · เข้าเพิ่มถ้าแตะ ${fmtPrice(st.breakout_level)}` : "")
+            : st.regime === "up" ? `เข้าทันทีที่แตะ ${fmtPrice(st.breakout_level)}` : "รอเทรนด์ขาขึ้น") : undefined}
         />
         <Stat
-          label={st?.in_position ? "SL ปัจจุบัน (แท่งถัดไป)" : "จุด breakout ถัดไป"}
+          label={st?.in_position ? (st.units > 1 ? "SL ใกล้สุด (แท่งถัดไป)" : "SL ปัจจุบัน (แท่งถัดไป)") : "จุดเข้าถัดไป (แตะแล้วเข้า)"}
           value={fmtPrice(st ? (st.in_position ? st.stop : st.breakout_level) : null)}
           sub={st && price ? (st.in_position && st.stop
             ? `ห่าง ${fmtPct(((price - st.stop) / price) * 100, 2)}`

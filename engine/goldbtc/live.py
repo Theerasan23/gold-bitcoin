@@ -9,8 +9,7 @@ import numpy as np
 
 from . import data as dt
 from .config import INTERVAL_SEC
-from .core import net_r
-from .core import simulate as core_sim
+from .core import net_r, simulate_touch
 from .indicators import highest_prev
 from .structure import volume_profile
 from .portfolio import TREND
@@ -36,16 +35,6 @@ def ensure_fresh(symbol: str, interval: str, min_gap_s: float = 60.0) -> int:
             return 0
         _, n = dt.update(symbol, interval)
         return n
-
-
-def _stop_path(h: np.ndarray, atr: np.ndarray, entry: int, last: int, init_stop: float, trail: float,
-               side: int) -> np.ndarray:
-    """เส้น SL ของไม้หนึ่งไม้ ณ ราคาปิดแต่ละแท่ง (= ระดับที่ใช้กับแท่งถัดไป) ตามตรรกะ Chandelier ใน backtest"""
-    if side == 1:
-        cand = np.maximum.accumulate(h[entry:last + 1]) - atr[entry:last + 1] * trail
-        return np.maximum.accumulate(np.maximum(np.nan_to_num(cand, nan=init_stop), init_stop))
-    cand = np.minimum.accumulate(h[entry:last + 1]) + atr[entry:last + 1] * trail
-    return np.minimum.accumulate(np.minimum(np.nan_to_num(cand, nan=init_stop), init_stop))
 
 
 def volume_profile_now(b: dict, length: int = 250, bins: int = 24) -> dict | None:
@@ -88,54 +77,53 @@ def sideways_boxes(b: dict, start: int, adx_max: float = 20.0, min_bars: int = 1
 def strategy_state(symbol: str, interval: str, bars: int = 500) -> dict:
     ds = Dataset(symbol, interval)
     p = ds.params(TREND)
+    if p.entry_on != "touch":
+        raise ValueError("strategy_state ใช้กับ entry_on=touch")
     b, t = ds.b, ds.t
     n = t.size
     t0 = _ms(data_start(t))
-    mask = t >= t0
-    raw = ds.raw(p)
-    T, eq, pos = core_sim(b, raw, p, mask, n)
+    T, eq, pos, stop_line = simulate_touch(b, p, t >= t0, n, cap=False)
     r = net_r(T)
     up, down = b["regimes"][p.regime]
     breakout = highest_prev(b["high"], p.breakout_len)
     start = max(0, n - bars)
 
-    # เส้น SL ของทุกไม้ที่อยู่ในช่วงที่แสดง (ไม้ที่ยังถืออยู่ = ถึงแท่งล่าสุด)
-    stop = np.full(n, np.nan)
+    # SL ที่ "มีผล" ในแท่ง i = ค่าที่คำนวณตอนปิดแท่ง i-1 (SL ของไม้ที่ใกล้ราคาที่สุด)
+    stop = np.r_[np.nan, stop_line[:-1]]
     trades = []
-    next_stop = None
     for k, row in enumerate(T):
         eb, xb, side = int(row[0]), int(row[1]), int(row[2])
-        entry_px, exit_px, risk = float(row[3]), float(row[4]), float(row[9])
         is_open = bool(int(row[8]) == 7 and xb == n - 1 and pos[-1] != 0)   # end_of_data = ยังไม่ปิดจริง
-        last = n - 1 if is_open else max(xb - 1, eb)
-        init = entry_px - side * risk
-        path = _stop_path(b["high"] if side == 1 else b["low"], b["atr"], eb, last, init, p.trail_atr, side)
-        if last >= start:
-            # SL ที่ "มีผล" ในแท่ง i คือค่าที่คำนวณตอนปิดแท่ง i-1 (แท่งที่เข้า = SL เริ่มต้น)
-            stop[eb:last + 1] = np.r_[init, path[:-1]]
-        next_stop = float(path[-1])
+        if np.isnan(stop[eb]):   # ไม้แรกของชุด : แท่งที่เข้าใช้ SL เริ่มต้น
+            stop[eb] = float(row[3]) - side * float(row[9])
         trades.append({
             "entry_time": int(t[eb] // 1000), "exit_time": None if is_open else int(t[xb] // 1000),
-            "side": "long" if side == 1 else "short", "entry_price": entry_px,
-            "exit_price": None if is_open else exit_px, "r": None if is_open else float(r[k]) if k < r.size else None,
+            "side": "long" if side == 1 else "short", "entry_price": float(row[3]),
+            "exit_price": None if is_open else float(row[4]), "r": None if is_open else float(r[k]),
             "exit_reason": None if is_open else ["stop", "trailing", "tp", "tp1", "trend_flip", "signal_exit",
                                                    "reverse", "end", "time"][int(row[8])],
-            "open": is_open,
+            "open": is_open, "risk": float(row[9]),
         })
 
     last_i = n - 1
-    in_pos = bool(pos[-1] != 0)
-    risk_now = float(b["atr"][last_i] * p.sl_atr)
+    held = [x for x in trades if x["open"]]
+    in_pos = bool(held)
+    level = float(np.nanmax(b["high"][last_i - p.breakout_len + 1:last_i + 1]))   # High 20 แท่งล่าสุด (รวมแท่งนี้)
+    last_px = held[-1]["entry_price"] if held else None   # ไม้ล่าสุด
+    next_entry = max(level, last_px) if last_px is not None else level
     status = {
         "time": int(t[last_i] // 1000),
         "close": float(b["close"][last_i]),
         "regime": "up" if up[last_i] else "down" if down[last_i] else "neutral",
         "in_position": in_pos,
-        "entry_price": trades[-1]["entry_price"] if in_pos and trades else None,
-        "stop": next_stop if in_pos else None,          # SL สำหรับแท่งถัดไป
-        "breakout_level": float(np.nanmax(b["high"][last_i - p.breakout_len + 1:last_i + 1])),
-        "signal_on_last_bar": bool(raw["long"][last_i] and up[last_i]),
-        "risk_per_unit": risk_now,       # ระยะ SL ถ้าเข้าตอนนี้ (2 ATR) — ใช้คำนวณขนาดไม้
+        "units": len(held),
+        "entry_price": held[-1]["entry_price"] if held else None,    # ไม้ล่าสุด
+        "avg_entry": float(np.mean([x["entry_price"] for x in held])) if held else None,
+        "stop": float(stop_line[last_i]) if in_pos else None,         # SL ที่ใกล้ราคาที่สุด สำหรับแท่งถัดไป
+        "positions": [{"entry_time": x["entry_time"], "entry_price": x["entry_price"]} for x in held],
+        "breakout_level": next_entry,     # ราคาที่จะเข้าไม้ (ถัดไป) ถ้าแตะในแท่งถัดไป
+        "signal_on_last_bar": bool(T.shape[0] > 0 and int(T[:, 0].max()) == last_i),   # เข้าไม้ในแท่งล่าสุด
+        "risk_per_unit": float(b["atr"][last_i] * p.sl_atr),   # ระยะ SL ถ้าเข้าแท่งถัดไป (2 ATR) — ใช้คำนวณขนาดไม้
         "atr": float(b["atr"][last_i]),
     }
     closed = [x["r"] for x in trades if x["r"] is not None]

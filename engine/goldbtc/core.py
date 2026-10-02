@@ -9,6 +9,9 @@ regime  htf_ema       EMA เร็ว/ช้า ของแท่ง TF ให
 entry   breakout · pullback (RSI2) · macd · rsi14 · stoch · bb_break · bb_squeeze · obv · candle
         double_bottom · inv_hs · asc_triangle · flag   (รูปแบบกราฟ: stop="structure" ใช้ SL ตามโครงสร้าง)
 exit    chandelier (trail_atr) · psar · target (target_r x R) · measured (เป้าจากรูปแบบ ไม่มีใช้ target_r)
+entry_on  close  ตัดสินตอนแท่งปิด เข้าราคาเปิดแท่งถัดไป ถือได้ทีละไม้
+          touch  (breakout เท่านั้น) เข้าทันทีที่ราคาแตะจุด breakout ระหว่างแท่ง + เข้าเพิ่มทุกครั้งที่ทำ high ใหม่
+                 เหนือไม้ล่าสุด (ไม่ต้องปิดไม้เดิม) · ทิศกลับปิดทุกไม้ที่ราคาเปิดแท่งแรกที่รู้
 """
 
 from __future__ import annotations
@@ -28,6 +31,7 @@ ENTRIES = ("breakout", "pullback", "macd", "rsi14", "stoch", "bb_break", "bb_squ
 PATTERNS = ("double_bottom", "inv_hs", "asc_triangle", "flag")
 REGIMES = ("htf_ema", "golden_cross", "ma200", "none")
 EXITS = ("chandelier", "psar", "target", "measured")
+ENTRY_ON = ("close", "touch")
 
 
 @dataclass(frozen=True)
@@ -58,6 +62,8 @@ class CoreParams:
     trail_atr: float = 3.0
     target_r: float = 3.0
     exit_on_regime: bool = True
+    entry_on: str = "close"
+    max_units: int = 0              # entry_on=touch : ไม้สูงสุดต่อเหรียญ (0 = ไม่จำกัด ใช้เพดานเงินคุม)
     # ต้นทุน: Binance spot taker 0.1% ต่อขา
     risk_pct: float = 1.0
     max_lev: float = 1.0
@@ -71,9 +77,12 @@ class CoreParams:
         if bad:
             raise ValueError(f"unknown params: {sorted(bad)}")
         p = replace(self, **kw)
-        for name, allowed in (("entry", ENTRIES), ("regime", REGIMES), ("exit", EXITS), ("stop", ("atr", "structure"))):
+        for name, allowed in (("entry", ENTRIES), ("regime", REGIMES), ("exit", EXITS), ("stop", ("atr", "structure")),
+                               ("entry_on", ENTRY_ON)):
             if getattr(p, name) not in allowed:
                 raise ValueError(f"{name} ต้องเป็นหนึ่งใน {allowed}")
+        if p.entry_on == "touch" and p.entry != "breakout":
+            raise ValueError("entry_on=touch ใช้ได้กับ entry=breakout เท่านั้น (สัญญาณอื่นต้องรอแท่งปิด)")
         return p
 
     def to_dict(self) -> dict:
@@ -208,9 +217,54 @@ def compose(b: dict, raw: dict, p: CoreParams) -> dict:
     }
 
 
+def touch_inputs(b: dict, p: CoreParams) -> dict:
+    """entry_on=touch : ทุกค่าของแท่ง i รู้ได้ตั้งแต่ราคาเปิดแท่ง i
+    (ทิศใช้แท่ง TF ใหญ่ที่ปิดแล้ว · ตัวกรอง ADX/Volume และ ATR ใช้แท่งก่อนหน้า · จุดแตะ = High/Low n แท่งก่อนหน้า)"""
+    up, down = b["regimes"][p.regime]
+    n = b["close"].size
+    ok = np.ones(n, bool)
+    if p.adx_min > 0:
+        ok &= b["adx"] >= p.adx_min
+    if p.vol_confirm:
+        ok &= b["vol_ratio"] > p.vol_mult
+    ok = np.r_[False, ok[:-1]]
+    risk = np.r_[np.nan, b["atr"][:-1]] * p.sl_atr
+    level_l = ta.highest_prev(b["high"], p.breakout_len)
+    level_s = ta.lowest_prev(b["low"], p.breakout_len)
+    flip = p.exit_on_regime and p.regime != "none"
+    return {
+        "level_l": level_l, "level_s": level_s, "risk": risk,
+        "arm_l": up & ok & p.allow_long & ~np.isnan(level_l) & ~np.isnan(risk),
+        "arm_s": down & ok & p.allow_short & ~np.isnan(level_s) & ~np.isnan(risk),
+        "exit_l": down & flip, "exit_s": up & flip,
+    }
+
+
+def simulate_touch(b: dict, p: CoreParams, entry_mask: np.ndarray | None = None, end: int | None = None,
+                   cap: bool = True):
+    """entry_on=touch -> (T, equity, จำนวนไม้ x ทิศ, SL ที่ใกล้ราคาที่สุด ณ ปิดแท่ง)
+    cap=False : บันทึกทุกไม้ตามสัญญาณ ไม่ตัดเพราะเงินไม่พอ (พอร์ตรวมจะตัดเองตามเงินทั้งพอร์ต)"""
+    n = b["close"].size if end is None else end
+    x = touch_inputs(b, p)
+    arm_l, arm_s = x["arm_l"], x["arm_s"]
+    if entry_mask is not None:
+        arm_l = arm_l & entry_mask
+        arm_s = arm_s & entry_mask
+    return bt.simulate_touch(
+        b["open"][:n], b["high"][:n], b["low"][:n], b["close"][:n], b["atr"][:n],
+        x["level_l"][:n], x["level_s"][:n], arm_l[:n], arm_s[:n], x["exit_l"][:n], x["exit_s"][:n], x["risk"][:n],
+        b["psar_l"][:n], b["psar_s"][:n], 1 if p.exit == "psar" else 0, p.exit in ("target", "measured"),
+        p.target_r, p.trail_atr, float(p.initial_capital), p.commission_pct / 100.0, p.slippage_ticks * p.tick_size,
+        p.risk_pct, p.max_lev, p.max_units, cap,
+    )
+
+
 def simulate(b: dict, raw: dict, p: CoreParams, entry_mask: np.ndarray | None = None, end: int | None = None,
              long_sig: np.ndarray | None = None, short_sig: np.ndarray | None = None):
     """รันถึงแท่ง end (ไม่รวม) ไม้ที่ค้างถูกปิดที่แท่งสุดท้าย · entry_mask = เข้าได้เฉพาะแท่งที่เป็น True"""
+    if p.entry_on == "touch" and long_sig is None and short_sig is None:
+        T, eq, pos, _ = simulate_touch(b, p, entry_mask, end)
+        return T, eq, pos
     sg = compose(b, raw, p)
     n = b["close"].size if end is None else end
     ls = sg["long"] if long_sig is None else long_sig

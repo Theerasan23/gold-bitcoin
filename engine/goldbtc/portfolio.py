@@ -6,6 +6,8 @@
   - มูลค่าที่ถือรวมทุกไม้ ≤ max_lev เท่าของ equity (spot = 1 เท่า) ถ้าเกินจะลดขนาดไม้ใหม่ลง
   - mark-to-market ทุกแท่งด้วยราคาปิด -> drawdown จริงระหว่างถือ
 จังหวะเข้า/ออกไม่ขึ้นกับขนาดไม้ จึงใช้รายการไม้จากการรันเดี่ยวได้ตรง ๆ
+  - ระบบ trend เข้าเพิ่มได้หลายไม้ต่อเหรียญ (entry_on=touch) แต่ละไม้เป็นรายการแยก
+  - ที่ว่างสำหรับไม้ใหม่ในแท่งใดคิดจากไม้ที่ถือตอนต้นแท่ง (ไม้ที่ปิดระหว่างแท่งเดียวกันยังไม่คืนที่ว่าง)
 """
 
 from __future__ import annotations
@@ -23,6 +25,7 @@ from . import data as dt
 from .config import DATA_DIR
 from .core import CoreParams, net_r, sqn
 from .core import simulate as core_sim
+from .core import simulate_touch
 from .meanrev import MRParams
 from .meanrev import signals as mr_signals
 from .meanrev import simulate as mr_sim
@@ -31,7 +34,8 @@ from .walkforward import Dataset, _ms, data_start
 MS_DAY = 86_400_000
 
 # ระบบที่ใช้ — ตั้งค่าตายตัวไว้ก่อน ไม่ได้ปรับจากผลพอร์ต
-TREND = {"entry": "breakout", "breakout_len": 20, "regime": "htf_ema", "exit": "chandelier", "trail_atr": 5.0}
+TREND = {"entry": "breakout", "breakout_len": 20, "regime": "htf_ema", "exit": "chandelier", "trail_atr": 5.0,
+         "entry_on": "touch"}
 RANGE = {"entry": "bb_fade", "regime": "adx20"}
 
 
@@ -66,7 +70,10 @@ def build_sleeve(kind: str, symbol: str, interval: str, t0: int, t1: int, data_d
     end = int(np.searchsorted(ds.t, t1))
     if kind == "trend":
         p = ds.params({**TREND, **(overrides or {})})
-        T, _, _ = core_sim(ds.b, ds.raw(p), p, mask, end)
+        if p.entry_on == "touch":   # ทุกไม้ตามสัญญาณ — พอร์ตตัดไม้ที่เงินไม่พอเอง
+            T, _, _, _ = simulate_touch(ds.b, p, mask, end, cap=False)
+        else:
+            T, _, _ = core_sim(ds.b, ds.raw(p), p, mask, end)
     else:
         p = MRParams().with_overrides(tick_size=dt.tick_size(symbol, data_dir), **{**RANGE, **(overrides or {})})
         T, _, _ = mr_sim(ds.b, mr_signals(ds.b, p), p, mask, end)
@@ -102,6 +109,7 @@ def simulate_portfolio(sleeves: list[Sleeve], t0: int, t1: int, risk_pct: float 
     equity = np.empty(timeline.size)
     exposure = np.zeros(timeline.size)
     skipped = 0
+    skipped_keys: set[tuple[str, int]] = set()
     eq_prev = capital
     for k, tk in enumerate(timeline):
         tk = int(tk)
@@ -115,6 +123,7 @@ def simulate_portfolio(sleeves: list[Sleeve], t0: int, t1: int, risk_pct: float 
                 qty = max(room, 0.0) / tr["entry_px"]
             if qty <= 0:
                 skipped += 1
+                skipped_keys.add((sym, tk))
                 continue
             pos = {"sym": sym, "side": tr["side"], "entry_px": tr["entry_px"], "qty": qty, "qty0": qty, "sleeve": si}
             cash -= tr["entry_px"] * qty * comm
@@ -132,7 +141,8 @@ def simulate_portfolio(sleeves: list[Sleeve], t0: int, t1: int, risk_pct: float 
         equity[k] = cash + unreal
         exposure[k] = sum(p["qty"] * closes[p["sym"]][k] for p in open_pos) / equity[k]
         eq_prev = equity[k]
-    return {"time": timeline, "equity": equity, "exposure": exposure, "skipped": skipped, "closes": closes}
+    return {"time": timeline, "equity": equity, "exposure": exposure, "skipped": skipped, "skipped_keys": skipped_keys,
+            "closes": closes}
 
 
 def _period(res: dict, x0: int, x1: int, label: str, bench: dict[str, np.ndarray]) -> dict:

@@ -111,7 +111,7 @@ def cmd_paper(a) -> None:
             cfg = pp.load_config(d)
             print(f"[{tf}] run {d.name} · ทุน {cfg.capital:,.0f} · equity {st.get('equity', cfg.capital):,.2f} · "
                   f"heartbeat {pp.iso(st.get('heartbeat_ms'))} UTC")
-            for p in (st.get("engine") or {}).get("positions", {}).values():
+            for p in pp.open_positions(st):
                 print(f"  ถือ {p['symbol']} {p['qty']:.6f} @ {p['entry_price']:,.2f} · SL {p['stop']:,.2f}")
             for t in pp.Store(d).read("trades")[-10:]:
                 print(f"  {t['symbol']} {pp.iso(t['entry_time'])} -> {pp.iso(t['exit_time'])} {t['r']:+.2f}R ({t['reason']})")

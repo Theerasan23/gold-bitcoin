@@ -57,10 +57,12 @@ def test_replay_matches_portfolio_backtest(two_symbols):
 
     n_bt = sum(len(s.trades) for s in sleeves)
     assert n_bt > 20, "ข้อมูลทดสอบต้องมีไม้มากพอ"
-    # ไม้ที่ปิดแล้วต้องตรงกันทุกไม้ (backtest บังคับปิดไม้สุดท้ายที่แท่งสุดท้าย -> ไม่นับ)
+    assert bt["skipped"] > 0, "ต้องมีช่วงที่เงินเต็มเพดาน เพื่อทดสอบการตัดไม้ให้ตรงกัน"
+    # ไม้ที่ปิดแล้วต้องตรงกันทุกไม้ (backtest บังคับปิดไม้สุดท้ายที่แท่งสุดท้าย -> ไม่นับ · ไม้ที่พอร์ตเงินไม่พอ -> ไม่นับ)
     last_bar = T0 + (N - 1) * H
     bt_closed = {(s.symbol, tr["entry_ms"], tr["exits"][-1][0], round(tr["exits"][-1][1], 6))
-                 for s in sleeves for tr in s.trades if tr["exits"][-1][0] != last_bar}
+                 for s in sleeves for tr in s.trades
+                 if tr["exits"][-1][0] != last_bar and (s.symbol, tr["entry_ms"]) not in bt["skipped_keys"]}
     pp_closed = {(x["symbol"], x["entry_bar"], x["exit_time"], round(x["exit_price"], 6)) for x in trades}
     assert pp_closed == bt_closed
     # equity ทุกแท่ง (ยกเว้นแท่งสุดท้าย) ต้องเท่ากัน
@@ -79,7 +81,7 @@ class FakeMarket:
         return {s: self.price for s in symbols}
 
     def minutes(self, symbol, start_ms, end_ms=None):
-        return [(start_ms, self.price, self.price, self.price)]
+        return [(start_ms, self.price, self.price, self.price, self.price)]
 
 
 def test_live_runner_cycle(two_symbols, monkeypatch):
@@ -109,21 +111,21 @@ def test_live_runner_cycle(two_symbols, monkeypatch):
 
 
 class ReplayMarket:
-    """ตลาดจำลองจากข้อมูลเต็ม : ราคาตอนนี้ = ราคาเปิดแท่งที่กำลังวิ่ง, แท่ง 1 นาที = OHLC ของแท่ง 4h นั้น"""
+    """ตลาดจำลองจากข้อมูลเต็ม : ราคาตอนนี้ = ราคาเปิดแท่งที่กำลังวิ่ง
+    ข้อมูลรายนาทีมีแค่ "นาที" เดียวที่เวลาเปิดแท่ง = OHLC ของทั้งแท่ง 4h (worker จึงเห็นราคาเหมือน backtest)"""
 
     def __init__(self, dfs):
-        self.d = {s: (df["open"].to_numpy(), df["high"].to_numpy(), df["low"].to_numpy()) for s, df in dfs.items()}
+        self.d = {s: tuple(df[k].to_numpy() for k in ("open", "high", "low", "close")) for s, df in dfs.items()}
         self.k = 0
 
     def prices(self, symbols):
         return {s: float(self.d[s][0][self.k]) for s in symbols}
 
     def minutes(self, symbol, start_ms, end_ms=None):
-        i = (start_ms - T0) // H
-        if i > self.k:
+        i, off = divmod(start_ms - T0, H)
+        if i > self.k or off:
             return []
-        o, h, l = self.d[symbol]
-        return [(start_ms, float(o[i]), float(h[i]), float(l[i]))]
+        return [(start_ms, *(float(x[i]) for x in self.d[symbol]))]
 
 
 def test_live_worker_matches_backtest_bar_by_bar(tmp_path, monkeypatch):
@@ -171,3 +173,54 @@ def test_one_active_account_per_timeframe(tmp_path, monkeypatch):
     assert active == {"4h": c, "15m": b}
     assert a.exists()                                  # รอบเก่าเก็บไว้ ไม่ลบ
     assert pp.load_config(active["4h"]).capital == 100
+
+
+class FlakyMarket(ReplayMarket):
+    """เน็ตหลุดทุก ๆ few ครั้งที่ขอข้อมูลรายนาที (กลาง step)"""
+
+    def __init__(self, dfs, every=5):
+        super().__init__(dfs)
+        self.calls, self.every = 0, every
+
+    def minutes(self, symbol, start_ms, end_ms=None):
+        self.calls += 1
+        if self.calls % self.every == 0:
+            raise ConnectionError("เน็ตหลุด")
+        return super().minutes(symbol, start_ms, end_ms)
+
+
+def test_live_worker_rolls_back_failed_step(tmp_path, monkeypatch):
+    """step ที่ล้มกลางทางต้องไม่ทิ้งไม้/เหตุการณ์ซ้ำ — ลองใหม่แล้วผลยังตรงกับ backtest ทุกไม้"""
+    syms = ["AAAUSDT", "BBBUSDT"]
+    full = {"AAAUSDT": _write(tmp_path, "AAAUSDT", 1), "BBBUSDT": _write(tmp_path, "BBBUSDT", 2, vol=0.008)}
+    clock = {"t": 0.0}
+    monkeypatch.setattr(pp.time, "time", lambda: clock["t"])
+    monkeypatch.setattr(pp.dt, "update", lambda *a, **k: (None, 0))
+    monkeypatch.setattr(pp.traceback, "print_exc", lambda: None)
+    pp.new_run(pp.PaperConfig(symbols=syms, max_lev=5.0), tmp_path)
+    mkt = FlakyMarket(full)
+
+    run = None
+    for k in range(3000, 3800):
+        for s in syms:
+            full[s].head(k).write_parquet(dt.candle_path(s, "4h", tmp_path))
+        mkt.k = k
+        clock["t"] = (T0 + k * H + 5 * 60_000) / 1000
+        run = run or pp.LiveRunner(tmp_path, market=mkt)
+        for _ in range(5):   # worker ลองใหม่รอบถัดไป (เวลาเดิม)
+            n_err = len([e for e in run.store.read("events") if e["type"] == "error"])
+            run.safe_step()
+            if len([e for e in run.store.read("events") if e["type"] == "error"]) == n_err:
+                break
+
+    assert any(e["type"] == "error" for e in run.store.read("events")), "ต้องมี step ที่ล้มจริง"
+    trades = run.store.read("trades")
+    keys = [(x["symbol"], x["entry_bar"]) for x in trades]
+    assert len(keys) == len(set(keys)), "ไม้ซ้ำ"
+    res = pp.compare(run.run_dir, tmp_path)
+    rows = res["trades"]
+    assert len(rows) >= 5
+    assert all(r["status"] == "ตรงกัน" for r in rows), [r for r in rows if r["status"] != "ตรงกัน"]
+    for r in rows:
+        if r["paper_r"] is not None and r["bt_r"] is not None:
+            assert r["paper_r"] == pytest.approx(r["bt_r"], abs=1e-9)

@@ -249,6 +249,217 @@ def simulate(o, h, l, c, atr, long_sig, short_sig, choch_up, choch_dn, htf_up, h
     return T[:k], equity, pos_arr
 
 
+@njit(cache=True)
+def simulate_touch(o, h, l, c, atr, level_l, level_s, arm_l, arm_s, exit_l, exit_s, risk_in, trail_l, trail_s,
+                   exit_mode, use_target, rr, trail_mult, capital, comm, slip, risk_pct, max_lev, max_units, cap):
+    """เข้าทันทีที่ราคาแตะจุด breakout ระหว่างแท่ง (คำสั่ง stop รอไว้) + เข้าเพิ่มได้หลายไม้ (pyramid)
+
+    ทุกอย่างที่ใช้ตัดสินในแท่ง i ต้องรู้ได้ตั้งแต่ราคาเปิดแท่ง i :
+      level_*  จุดแตะ (เช่น High สูงสุด 20 แท่งก่อนหน้า) · arm_*  เข้าได้ (ทิศ + ตัวกรอง)
+      exit_*   ทิศกลับ -> ปิดทุกไม้ที่ราคาเปิด · risk_in  ระยะ SL ของไม้ที่จะเข้า (ATR แท่งก่อน x sl_atr)
+    ไม้ถัดไปต้องทะลุทั้ง level และราคาเข้าไม้ล่าสุด · เข้าได้แท่งละ 1 ไม้ · max_units 0 = ไม่จำกัด
+    แต่ละไม้มี SL ของตัวเอง แล้วเลื่อนตาม trailing ร่วมกัน (Chandelier จากจุดสุดตั้งแต่ไม้แรก หรือ trail_* จากภายนอก)
+    use_target  ปิดแต่ละไม้ที่ rr x R แทน trailing
+    ลำดับราคาในแท่ง : open -> high -> low -> close ถ้า open ใกล้ high กว่า ไม่งั้น open -> low -> high -> close
+    cap  True = ไม้ที่เงินไม่พอ (เกิน max_lev) ยังนับเป็นสัญญาณแต่ไม่บันทึก · False = บันทึกทุกไม้ (ใช้กับพอร์ตรวม)
+    คืน T (เรียงตามแท่งที่เข้า), equity, จำนวนไม้ x ทิศ, SL ที่ใกล้ราคาที่สุด ณ ปิดแท่ง"""
+    n = c.size
+    T = np.full((n + 2, N_COLS), np.nan)
+    k = 0
+    equity = np.empty(n)
+    pos_arr = np.zeros(n, np.int64)
+    stop_line = np.full(n, np.nan)
+    u_eb = np.zeros(n, np.int64)
+    u_px = np.zeros(n)
+    u_risk = np.zeros(n)
+    u_stop = np.zeros(n)
+    u_init = np.zeros(n)
+    u_lim = np.zeros(n)
+    u_qty = np.zeros(n)
+    u_comm = np.zeros(n)
+    m = 0
+    side = 0
+    last_px = np.nan
+    ext = np.nan
+    trail = np.nan
+    camp_start = -1
+    eq_real = capital
+    eq_prev = capital
+    pts = np.empty(4)
+
+    for i in range(n):
+        held = 0.0
+        if i > 0:
+            for j in range(m):
+                held += u_qty[j] * c[i - 1]
+
+        # ---------- 1) ทิศกลับ : ปิดทุกไม้ที่ราคาเปิด ----------
+        if m > 0 and ((side == 1 and exit_l[i]) or (side == -1 and exit_s[i])):
+            px = o[i] - side * slip
+            for j in range(m):
+                if u_qty[j] > 0:
+                    eq_real += _record(T, k, u_eb[j], i, side, u_px[j], px, u_qty[j], u_qty[j], u_risk[j], EXIT_HTF,
+                                       comm, u_comm[j])
+                    k += 1
+            m = 0
+        if m == 0:
+            side = 0
+            last_px = np.nan
+            ext = np.nan
+            trail = np.nan
+
+        # ---------- 2) จุดแตะของแท่งนี้ ----------
+        room_ok = (max_units == 0 or m < max_units) and risk_in[i] > 0
+        want_l = room_ok and arm_l[i] and side >= 0 and not np.isnan(level_l[i])
+        want_s = room_ok and arm_s[i] and side <= 0 and not np.isnan(level_s[i])
+        trig_l = level_l[i] if side == 0 else max(level_l[i], last_px)
+        trig_s = level_s[i] if side == 0 else min(level_s[i], last_px)
+
+        # ---------- 3) เดินราคาในแท่ง ----------
+        pts[0] = o[i]
+        if (h[i] - o[i]) <= (o[i] - l[i]):
+            pts[1] = h[i]
+            pts[2] = l[i]
+        else:
+            pts[1] = l[i]
+            pts[2] = h[i]
+        pts[3] = c[i]
+        a = o[i]
+        entered = False
+        for s_ in range(4):
+            b = pts[s_]
+            gap = s_ == 0
+            go_up = gap or b > a
+            go_dn = gap or b < a
+            j = 0
+            while j < m:
+                hit = False
+                px = 0.0
+                rsn = EXIT_STOP
+                if side == 1:
+                    if go_dn and b <= u_stop[j]:
+                        hit = True
+                        px = (b if gap else u_stop[j]) - slip
+                        rsn = EXIT_STOP if u_stop[j] == u_init[j] else EXIT_TRAIL
+                    elif use_target and go_up and b >= u_lim[j]:
+                        hit = True
+                        px = b if gap else u_lim[j]
+                        rsn = EXIT_TP
+                else:
+                    if go_up and b >= u_stop[j]:
+                        hit = True
+                        px = (b if gap else u_stop[j]) + slip
+                        rsn = EXIT_STOP if u_stop[j] == u_init[j] else EXIT_TRAIL
+                    elif use_target and go_dn and b <= u_lim[j]:
+                        hit = True
+                        px = b if gap else u_lim[j]
+                        rsn = EXIT_TP
+                if hit:
+                    if u_qty[j] > 0:
+                        eq_real += _record(T, k, u_eb[j], i, side, u_px[j], px, u_qty[j], u_qty[j], u_risk[j], rsn,
+                                           comm, u_comm[j])
+                        k += 1
+                    m -= 1
+                    u_eb[j] = u_eb[m]
+                    u_px[j] = u_px[m]
+                    u_risk[j] = u_risk[m]
+                    u_stop[j] = u_stop[m]
+                    u_init[j] = u_init[m]
+                    u_lim[j] = u_lim[m]
+                    u_qty[j] = u_qty[m]
+                    u_comm[j] = u_comm[m]
+                else:
+                    j += 1
+            if m == 0 and side != 0:
+                side = 0
+                last_px = np.nan
+                ext = np.nan
+                trail = np.nan
+
+            if not entered:
+                d = 0
+                raw = 0.0
+                if want_l and go_up and b > trig_l:
+                    d = 1
+                    raw = b if gap else trig_l
+                elif want_s and go_dn and b < trig_s:
+                    d = -1
+                    raw = b if gap else trig_s
+                if d != 0:
+                    entered = True
+                    fill = raw + d * slip
+                    rk = risk_in[i]
+                    qty = risk_pct / 100.0 * eq_prev / rk
+                    if cap:
+                        room = max_lev * eq_prev - held
+                        if qty * fill > room:
+                            qty = max(room, 0.0) / fill
+                    if side == 0:
+                        camp_start = i
+                        ext = np.nan
+                        trail = np.nan
+                    side = d
+                    last_px = raw
+                    u_eb[m] = i
+                    u_px[m] = fill
+                    u_risk[m] = rk
+                    u_init[m] = fill - d * rk
+                    u_stop[m] = u_init[m]
+                    u_lim[m] = fill + d * rk * rr
+                    u_qty[m] = qty if qty > 0 else 0.0
+                    u_comm[m] = fill * u_qty[m] * comm
+                    eq_real -= u_comm[m]
+                    m += 1
+                    # ไม้ใหม่ถึงเป้าในช่วงราคาเดียวกันได้ (SL ต้องรอช่วงที่ราคาย้อนกลับ)
+                    if use_target and not gap and ((d == 1 and b >= u_lim[m - 1]) or (d == -1 and b <= u_lim[m - 1])):
+                        if u_qty[m - 1] > 0:
+                            eq_real += _record(T, k, i, i, d, fill, u_lim[m - 1], u_qty[m - 1], u_qty[m - 1], rk,
+                                               EXIT_TP, comm, u_comm[m - 1])
+                            k += 1
+                        m -= 1
+                        if m == 0:
+                            side = 0
+                            last_px = np.nan
+            a = b
+
+        # ---------- 4) แท่งปิด : เลื่อน trailing ร่วมของทุกไม้ ----------
+        if m > 0:
+            if side == 1:
+                ext = h[i] if camp_start == i or np.isnan(ext) else max(ext, h[i])
+                ch = (ext - atr[i] * trail_mult) if exit_mode == 0 else trail_l[i]
+                if not np.isnan(ch):
+                    trail = ch if np.isnan(trail) else max(trail, ch)
+            else:
+                ext = l[i] if camp_start == i or np.isnan(ext) else min(ext, l[i])
+                ch = (ext + atr[i] * trail_mult) if exit_mode == 0 else trail_s[i]
+                if not np.isnan(ch):
+                    trail = ch if np.isnan(trail) else min(trail, ch)
+            near = np.nan
+            for j in range(m):
+                if not use_target and not np.isnan(trail):
+                    u_stop[j] = max(u_stop[j], trail) if side == 1 else min(u_stop[j], trail)
+                if np.isnan(near) or (side == 1 and u_stop[j] > near) or (side == -1 and u_stop[j] < near):
+                    near = u_stop[j]
+            stop_line[i] = near
+
+        unreal = 0.0
+        for j in range(m):
+            unreal += side * u_qty[j] * (c[i] - u_px[j])
+        equity[i] = eq_real + unreal
+        eq_prev = equity[i]
+        pos_arr[i] = side * m
+
+    for j in range(m):
+        if u_qty[j] > 0:
+            eq_real += _record(T, k, u_eb[j], n - 1, side, u_px[j], c[n - 1], u_qty[j], u_qty[j], u_risk[j], EXIT_END,
+                               comm, u_comm[j])
+            k += 1
+    if m > 0:
+        equity[n - 1] = eq_real
+    T = T[:k]
+    return T[np.argsort(T[:, 0], kind="mergesort")], equity, pos_arr, stop_line
+
+
 def nan_extras(n: int) -> tuple[np.ndarray, ...]:
     """risk_l, risk_s, tgt_l, tgt_s, trail_l, trail_s ว่างทั้งหมด (= ใช้ค่าจาก ATR)"""
     z = np.full(n, np.nan)

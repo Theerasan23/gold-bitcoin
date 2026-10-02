@@ -12,7 +12,7 @@ import { useLiveKline } from "@/lib/useLiveKline";
 import { fmtNum, fmtPct, fmtPrice, fmtR, fmtTime, SYMBOL_LABEL, TF_LABEL, TF_SEC } from "@/lib/format";
 
 const EVENT: Record<string, string> = {
-  new_run: "เริ่มบัญชีใหม่", signal: "สัญญาณเข้า", entry: "เข้าไม้", stop_moved: "เลื่อน SL",
+  new_run: "เริ่มบัญชีใหม่", signal: "ราคาแตะจุดเข้า", entry: "เข้าไม้", stop_moved: "เลื่อน SL",
   signal_exit: "สัญญาณออก (ทิศกลับ)", exit: "ออกไม้", skip: "ข้ามสัญญาณ", error: "ข้อผิดพลาด",
 };
 const REASON: Record<string, string> = { stop: "โดน SL", trailing: "trailing stop", trend_flip: "ทิศกลับ" };
@@ -24,9 +24,12 @@ function eventDetail(e: PaperEvent): string {
   const n = (k: string) => (typeof e[k] === "number" ? (e[k] as number) : null);
   switch (e.type) {
     case "new_run": return `ทุน ${fmtNum(n("capital"), 0)} · เสี่ยง ${n("risk_pct")}%/ไม้`;
-    case "signal": return `ปิด ${fmtPrice(n("close"))} เหนือ breakout -> เข้าที่แท่งถัดไป`;
-    case "entry": return `ราคา ${fmtPrice(n("price"))} (backtest สมมติ ${fmtPrice(n("ref_price"))}) · ${fmtNum(n("qty"), 5)} · SL ${fmtPrice(n("stop"))}`;
-    case "stop_moved": return `${fmtPrice(n("old"))} -> ${fmtPrice(n("new"))}`;
+    case "signal": return n("trigger") != null
+      ? `แตะ ${fmtPrice(n("trigger"))} · สัญญาณไม้ที่ ${n("unit")} -> เข้าทันที`
+      : `ปิด ${fmtPrice(n("close"))} เหนือ breakout -> เข้าที่แท่งถัดไป`;   // บัญชีรุ่นก่อน
+    case "entry": return `ราคา ${fmtPrice(n("price"))} (backtest สมมติ ${fmtPrice(n("ref_price"))}) · ${fmtNum(n("qty"), 5)} · SL ${fmtPrice(n("stop"))}`
+      + (n("units") != null && n("units")! > 1 ? ` · ถือ ${n("units")} ไม้` : "");
+    case "stop_moved": return `${fmtPrice(n("old"))} -> ${fmtPrice(n("new"))}` + (n("units") != null && n("units")! > 1 ? ` (${n("units")} ไม้)` : "");
     case "exit": return `ราคา ${fmtPrice(n("price"))} · ${REASON[String(e.reason)] ?? e.reason} · ${fmtR(n("r"))}`;
     default: return String(e.message ?? e.reason ?? "");
   }
@@ -65,7 +68,8 @@ function DemoChart({ status, trades }: { status: PaperStatus; trades: PaperTrade
   const { live } = useLiveKline(symbol, tf, () => setTimeout(() => setNonce((n) => n + 1), 5_000));
 
   const cur = data?.key === symbol ? data : null;
-  const pos = status.positions.find((p) => p.symbol === symbol);
+  const pos = status.positions.filter((p) => p.symbol === symbol);
+  const watch = status.watch?.[symbol];
   const st = cur?.strategy.status;
   const mine = trades.filter((t) => t.symbol === symbol);
   return (
@@ -75,12 +79,13 @@ function DemoChart({ status, trades }: { status: PaperStatus; trades: PaperTrade
         options={status.config.symbols.map((s) => ({ value: s, label: SYMBOL_LABEL[s] ?? s }))} />}
     >
       <p className="mb-2 text-sm text-ink-2">
-        {pos
-          ? `ถือ ${short(symbol)} อยู่ · เข้า ${fmtPrice(pos.entry_price)} · SL ${fmtPrice(pos.stop)} (เลื่อนขึ้นตามราคาทุกครั้งที่แท่ง ${tf} ปิด)`
+        {pos.length
+          ? `ถือ ${short(symbol)} ${pos.length} ไม้ · เข้าล่าสุด ${fmtPrice(pos[pos.length - 1].entry_price)} · SL ใกล้สุด ${fmtPrice(Math.max(...pos.map((p) => p.stop)))} (แต่ละไม้มี SL ของตัวเอง เลื่อนขึ้นทุกครั้งที่แท่ง ${tf} ปิด)`
+            + (watch ? ` · เข้าเพิ่มถ้าแตะ ${fmtPrice(watch.trigger)}` : "")
           : mine.length === 0
             ? st
               ? st.regime === "up"
-                ? `ยังไม่มีไม้ ${short(symbol)} — จะเข้าเมื่อแท่ง ${tf} ปิดเหนือ ${fmtPrice(st.breakout_level)} (เส้นสีเทา)`
+                ? `ยังไม่มีไม้ ${short(symbol)} — จะเข้าทันทีที่ราคาแตะ ${fmtPrice(watch?.trigger ?? st.breakout_level)} (เส้นสีเทา)`
                 : `ยังไม่มีไม้ ${short(symbol)} — เทรนด์ TF ใหญ่ไม่ใช่ขาขึ้น ระบบไม่เข้า (ถือเงินสด)`
               : "กำลังโหลด…"
             : `${short(symbol)} ปิดไปแล้ว ${mine.length} ไม้ · ตอนนี้ไม่มีไม้`}
@@ -228,7 +233,9 @@ export default function DemoView() {
         <Stat label="กำไร / ขาดทุน" value={fmtPct(pnlPct, 2, true)} tone={pnlPct > 0 ? "good" : pnlPct < 0 ? "bad" : undefined}
           sub={`${fmtNum(status.equity - cap, 2)} USDT`} />
         <Stat label="ไม้ที่ถือ" value={String(status.positions.length)}
-          sub={Object.keys(status.pending).length ? "มีคำสั่งรอเข้า/ออก" : "ไม่มีคำสั่งค้าง"} />
+          sub={Object.keys(status.watch ?? {}).length
+            ? `รอแตะ ${Object.entries(status.watch).map(([s, w]) => `${short(s)} ${fmtPrice(w.trigger)}`).join(" · ")}`
+            : "ไม่มีจุดรอเข้า"} />
         <Stat label="ไม้ที่ปิดแล้ว" value={String(status.closed.trades)}
           sub={status.closed.trades ? `ชนะ ${status.closed.wins} · รวม ${fmtR(status.closed.total_r)}` : "ยังไม่มี"} />
       </div>
@@ -238,7 +245,7 @@ export default function DemoView() {
       <Card title="ไม้ที่ถืออยู่" aside="ราคาอัปเดตทุก 15 วินาทีจาก worker">
         {status.positions.length === 0 ? (
           <p className="text-sm text-ink-2">
-            ยังไม่มีไม้ — ระบบรอสัญญาณ (ปิดเหนือ High 20 แท่ง ขณะเทรนด์ TF ใหญ่ขาขึ้น) ตรวจทุกครั้งที่แท่ง 4h ปิด
+            ยังไม่มีไม้ — ระบบรอราคาแตะ High 20 แท่ง ขณะเทรนด์ TF ใหญ่ขาขึ้น (เช็คทุกนาที เข้าทันทีที่แตะ)
           </p>
         ) : (
           <div className="overflow-x-auto">
@@ -256,7 +263,7 @@ export default function DemoView() {
               </thead>
               <tbody>
                 {status.positions.map((p) => (
-                  <tr key={p.symbol} className="border-b border-line last:border-0">
+                  <tr key={`${p.symbol}-${p.entry_time}`} className="border-b border-line last:border-0">
                     <td className="py-1.5 pr-3 text-ink">{SYMBOL_LABEL[p.symbol] ?? p.symbol}</td>
                     <td className="py-1.5 pr-3 text-ink">{fmtTime(sec(p.entry_time))}</td>
                     <td className="py-1.5 pr-3 text-right text-ink">{fmtPrice(p.entry_price)}</td>
